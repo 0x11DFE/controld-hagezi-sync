@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD Hagezi Folder Auto-Sync
-# Version: 1.0.1
+# Version: 1.1.0
 # Description: Syncs Hagezi DNS blocklist folders to ControlD profiles.
 #              Pure Bash. No Python. TOML-driven configuration.
 # Requirements: bash 4.3+, curl, jq
@@ -9,6 +9,8 @@
 # =============================================================================
 
 set -o pipefail
+
+VERSION="1.1.0"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -24,6 +26,9 @@ API_BASE="https://api.controld.com"
 
 # GitHub API for checking last commit date of Hagezi files
 HAGEZI_API="https://api.github.com/repos/hagezi/dns-blocklists/commits"
+
+# Batch size for rule insertion (ControlD API limit)
+BATCH_SIZE=500
 
 # ---------------------------------------------------------------------------
 # GLOBALS (populated by load_config)
@@ -423,7 +428,7 @@ add_all_rules() {
     local group_id="$2"
     local file="$3"
     local total do_val status_val
-    local batch_size=500
+    local batch_size="$BATCH_SIZE"
     local added=0 batch_num=0 remaining current_batch_size
     local hostnames body resp code resp_body
 
@@ -533,6 +538,88 @@ get_filename_from_url() {
 }
 
 # ---------------------------------------------------------------------------
+# LIST HAGEZI FOLDERS (standalone helper)
+# ---------------------------------------------------------------------------
+
+list_hagezi() {
+    log "Fetching available Hagezi ControlD folders from GitHub..."
+
+    local api_url="https://api.github.com/repos/hagezi/dns-blocklists/contents/controld"
+    local tmpfile
+    tmpfile=$(mktemp)
+
+    local http_code
+    http_code=$(curl -s -w "%{http_code}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        -H "User-Agent: controld-hagezi-sync/${VERSION}" \
+        -o "$tmpfile" \
+        "$api_url")
+
+    if [[ "$http_code" != "200" ]]; then
+        rm -f "$tmpfile"
+        if [[ "$http_code" == "403" ]]; then
+            log "ERROR: GitHub API rate limit hit (HTTP 403)."
+            log "       Set a GITHUB_TOKEN env var or wait ~1 hour."
+        elif [[ "$http_code" == "404" ]]; then
+            log "ERROR: Hagezi repo path not found. The directory structure may have changed."
+        else
+            log "ERROR: GitHub API returned HTTP $http_code"
+        fi
+        return 1
+    fi
+
+    local resp
+    resp=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    if [[ -z "$resp" || "$resp" == "null" || "$resp" == *'"message"'* ]]; then
+        local msg
+        msg=$(echo "$resp" | jq -r '.message // "Unknown API error"' 2>/dev/null || echo "Unknown API error")
+        log "ERROR: $msg"
+        return 1
+    fi
+
+    local count
+    count=$(echo "$resp" | jq '[.[] | select(.type == "file" and (.name | endswith(".json")))] | length')
+
+    if [[ "$count" -eq 0 ]]; then
+        log "No .json folder definitions found in hagezi/dns-blocklists/controld/"
+        return 1
+    fi
+
+    echo ""
+    log "Found $count Hagezi folder(s) — ready to paste into config.toml:"
+    echo "═══════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "[folders]"
+    echo ""
+
+    echo "$resp" | jq -r '
+        .[] | select(.type == "file" and (.name | endswith(".json"))) |
+        (.name |
+            if endswith("-folder.json") then rtrimstr("-folder.json")
+            elif endswith(".json") then rtrimstr(".json")
+            else . end |
+            gsub("_"; " ") |
+            gsub("-"; " ") |
+            . as $raw |
+            ($raw | ascii_upcase[0:1]) + ($raw[1:] | ascii_downcase)
+        ) as $title |
+        "\"\($title)\" = \"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/\(.name)\""
+    ' | sort
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════════"
+    echo ""
+    log "Tip: Copy the lines above into your config.toml under [folders]."
+    log "Then map them per profile in [profile_folders], e.g.:"
+    echo ""
+    echo '  [profile_folders]'
+    echo '  Tesla = ["Badware Hoster", "Spam Tlds"]'
+    echo '  Kids  = ["Badware Hoster", "Spam Idns", "Referral Allow"]'
+}
+
+# ---------------------------------------------------------------------------
 # CORE SYNC LOGIC
 # ---------------------------------------------------------------------------
 
@@ -620,15 +707,23 @@ parse_args() {
                 CONFIG_FILE="$2"
                 shift 2
                 ;;
+            --list-hagezi)
+                check_deps
+                list_hagezi
+                exit 0
+                ;;
             -h|--help)
-                cat << 'EOF'
+                cat << EOF
+ControlD Hagezi Folder Auto-Sync v${VERSION}
+
 Usage: ./sync-hagezi.sh [OPTIONS]
 
 Options:
-  --config FILE   Use a custom configuration file (default: config.toml)
-  --dry-run       Preview changes without modifying any ControlD data
-  --profile NAME  Sync only the named profile (must match profiles.names)
-  -h, --help      Show this help message and exit
+  --config FILE    Use a custom configuration file (default: config.toml)
+  --dry-run        Preview changes without modifying any ControlD data
+  --profile NAME   Sync only the named profile (must match profiles.names)
+  --list-hagezi    List available Hagezi folders (ready for config.toml)
+  -h, --help       Show this help message and exit
 
 Environment:
   CONTROLD_API_TOKEN   Required if not set in config.toml. Your ControlD API
@@ -640,6 +735,7 @@ Examples:
   ./sync-hagezi.sh --profile Tesla    # Sync only Tesla
   ./sync-hagezi.sh --dry-run          # Preview all changes
   ./sync-hagezi.sh --config my.toml   # Use custom config
+  ./sync-hagezi.sh --list-hagezi      # List available Hagezi sources
 EOF
                 exit 0
                 ;;
@@ -707,7 +803,7 @@ main() {
     check_deps
 
     log "========================================"
-    log "ControlD Hagezi Folder Sync Starting"
+    log "ControlD Hagezi Folder Sync v${VERSION}"
     [[ "$DRY_RUN" == true ]] && log "MODE: DRY-RUN (no changes will be made)"
     log "Config: $CONFIG_FILE"
     log "Profiles: ${PROFILE_NAMES[*]}"

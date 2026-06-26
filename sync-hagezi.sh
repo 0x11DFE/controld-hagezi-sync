@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD Hagezi Folder Auto-Sync
-# Version: 1.0.0
+# Version: 1.0.1
 # Description: Syncs Hagezi DNS blocklist folders to ControlD profiles.
 #              Pure Bash. No Python. TOML-driven configuration.
 # Requirements: bash 4.3+, curl, jq
@@ -526,15 +526,10 @@ get_github_last_updated() {
     fi
 }
 
-get_filename() {
-    case "$1" in
-        "Badware Hoster")         echo "badware-hoster-folder.json" ;;
-        "Most Abused TLDs")       echo "spam-tlds-combined-folder.json" ;;
-        "Spam IDNs")              echo "spam-idns-folder.json" ;;
-        "No Safesearch Support")  echo "nosafesearch-folder.json" ;;
-        "META Tracker Allow")     echo "meta-tracker-allow-folder.json" ;;
-        *) echo "" ;;
-    esac
+# Extract filename from URL path (e.g. https://.../badware-hoster-folder.json)
+get_filename_from_url() {
+    local url="$1"
+    echo "${url##*/}"
 }
 
 # ---------------------------------------------------------------------------
@@ -795,7 +790,7 @@ main() {
     log "--- Hagezi Folder Last Updated (GitHub) ---"
     for folder_name in "${!HAGEZI_FOLDERS[@]}"; do
         local filename
-        filename=$(get_filename "$folder_name")
+        filename=$(get_filename_from_url "${HAGEZI_FOLDERS[$folder_name]}")
         if [[ -n "$filename" ]]; then
             log "$folder_name: $(get_github_last_updated "$filename")"
         fi

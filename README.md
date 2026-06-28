@@ -29,6 +29,8 @@ Automatically sync Hagezi DNS blocklists to your ControlD profiles via the Contr
 | **Local CLI experience**       | Native Bash script (excellent)                    | Python script                                              | Go binary                                                                      | Python script + Docker container                                         |
 | **Setup simplicity (Actions)** | Edit TOML + commit + secret                       | Edit Python file + secrets                                 | **Easiest**: Just add secrets (no config commit)                               | CLI args / Kubernetes manifests                                          |
 | **Rule batching**              | 500 rules (with retries)                          | 500 rules (with retries)                                   | 500 rules (with retries)                                                       | Deletes + re-imports (batching assumed)                                  |
+| **Backup/restore fallback**    | :white_check_mark: Automatic                      | :x: No                                                     | :x: No                                                                         | :x: No                                                                   |
+| **GitHub Actions summary**     | :white_check_mark: Markdown table                 | :x: No                                                     | :x: No                                                                         | :x: No                                                                   |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
 
@@ -39,12 +41,14 @@ Automatically sync Hagezi DNS blocklists to your ControlD profiles via the Contr
 ## What it does
 
 - Downloads the latest Hagezi blocklist folder definitions (JSON)
+- Backs up existing folders before deletion (automatic fallback on failure)
 - Deletes existing folders in your ControlD profiles (by PK)
 - Recreates them with fresh rules, batched in groups of 500
 - Supports multiple profiles with **different folder combinations**
 - Runs on a schedule or on-demand via GitHub Actions
 - **Dry-run mode** to preview changes before they go live
 - **Freshness report** showing when each Hagezi list was last updated on GitHub
+- **GitHub Actions summary** with a markdown table of sync results
 
 ---
 
@@ -66,6 +70,8 @@ cp config.toml.example config.toml
 6. **Run it:**
    - Go to **Actions -> Sync Hagezi to ControlD -> Run workflow**
    - Or wait for the daily 03:00 UTC cron job
+
+After each run, check the **Summary** tab on the workflow run page for a clean markdown table showing exactly what succeeded, what failed, and the rule counts for each profile/folder combination.
 
 ---
 
@@ -198,6 +204,12 @@ When running manually via **Actions -> Run workflow**, you can specify:
 | `profile` | Sync only a specific profile (leave empty for all) |
 | `dry_run` | Check the box to run in preview mode |
 
+After the run completes, open the **Summary** tab to see a markdown table with:
+- Profile name
+- Folder name
+- Status (success/failure emoji)
+- Rule count
+
 ---
 
 ## Security Notes
@@ -205,6 +217,7 @@ When running manually via **Actions -> Run workflow**, you can specify:
 - **Never commit `config.toml` if it contains your API token.**
 - **Use GitHub Secrets** for the token in CI/CD.
 - The script strips a leading `Bearer ` prefix from the token automatically if present.
+- In GitHub Actions, the token is automatically masked via `::add-mask::` to prevent accidental exposure in logs.
 
 ---
 
@@ -221,9 +234,12 @@ When running manually via **Actions -> Run workflow**, you can specify:
 1. Reads `config.toml` to know which profiles and folders to manage.
 2. Fetches your ControlD profile list to resolve names to IDs.
 3. Downloads each Hagezi folder JSON once (cached per run).
-4. For each profile, deletes existing folders by PK, then recreates them with fresh rules.
-5. Rules are inserted in batches of 500 to stay within API limits.
-6. Prints a freshness report showing when each Hagezi list was last updated on GitHub.
+4. For each profile, **backs up existing folders** before deletion.
+5. Deletes existing folders by PK, then recreates them with fresh rules.
+6. Rules are inserted in batches of 500 to stay within API limits.
+7. If rule injection fails, **automatically restores the original folder from backup**.
+8. In GitHub Actions, generates a **markdown summary table** on the workflow run page.
+9. Prints a freshness report showing when each Hagezi list was last updated on GitHub.
 
 ---
 
@@ -237,8 +253,8 @@ The built-in parser is intentionally minimal. It handles:
 - Booleans: `true` / `false`
 
 It does **not** support:
-- Escaped quotes inside strings (`\\"`)
-- Multi-line literal strings (`'''`)
+- Escaped quotes inside strings
+- Multi-line literal strings
 - Inline tables
 - Date/time types
 
@@ -270,6 +286,7 @@ Keep your config simple and these limitations will not affect you.
 | `Failed to fetch profiles (HTTP 401)` | Your API token is invalid or expired. Generate a new one from the ControlD dashboard. |
 | `Batch X failed (HTTP 4xx/5xx)` | The script retries automatically with exponential backoff. If persistent, check ControlD API status. |
 | `--list-hagezi shows rate limit` | GitHub unauthenticated API limit is 60/hr or 5000/hr w/ GITHUB_TOKEN env var. |
+| `Backup OK: 0 rules saved` | ControlD API read-after-write inconsistency on newly created groups. The backup is empty but harmless — the next sync will capture the rules. |
 
 ---
 

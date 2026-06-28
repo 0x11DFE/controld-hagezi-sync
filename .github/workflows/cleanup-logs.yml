@@ -1,4 +1,3 @@
-# cleanup-logs.yml
 name: Cleanup sync logs
 
 on:

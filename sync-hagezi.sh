@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD Hagezi Folder Auto-Sync
-# Version: 1.4.2
+# Version: 1.5.0
 # Description: Syncs Hagezi DNS blocklist folders to ControlD profiles.
-#              Pure Bash. No Python. TOML-driven configuration.
+#              Features automatic backup/restore fallback for safe rule
+#              replacements. Pure Bash. No Python. TOML-driven configuration.
 # Requirements: bash 4.3+, curl, jq
 # Platform: Linux, macOS, Termux (Android), GitHub Actions
 # =============================================================================
 
 set -o pipefail
-shopt -s extglob  # Enable extended glob patterns for whitespace trimming (e.g., ${var%%+([[:space:]])})
+shopt -s extglob
 
-VERSION="1.4.2"
+VERSION="1.5.0"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -39,6 +40,7 @@ TARGET_PROFILE=""
 SUCCESS_COUNT=0
 FAILED_COUNT=0
 TMPDIR=""
+SUMMARY_FILE=""
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -95,11 +97,6 @@ api_call_with_retry() {
 # ---------------------------------------------------------------------------
 # TOML PARSER (Pure Bash)
 # ---------------------------------------------------------------------------
-# NOTE: Pragmatic parser. Handles sections, quoted/unquoted keys, strings,
-#       booleans, and multi-line arrays. Does NOT support escaped quotes,
-#       multi-line literals, inline tables, or date/time types.
-#       Requires shopt -s extglob for whitespace trimming.
-# ---------------------------------------------------------------------------
 
 parse_toml() {
     local file="$1" line section="" key raw_val val array_buf="" inner
@@ -111,7 +108,6 @@ parse_toml() {
     while IFS= read -r line || [[ -n "$line" ]]; do
         [[ -z "${line// /}" ]] && continue
 
-        # Strip inline comments (quote-aware: # inside "..." is preserved)
         local out="" ch in_q=0
         local -i j line_len=${#line}
         for ((j=0; j<line_len; j++)); do
@@ -142,7 +138,6 @@ parse_toml() {
             continue
         fi
 
-        # Try quoted key first, then unquoted key
         local quoted_key_re='^[[:space:]]*"([^"]+)"[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$'
         if [[ "$line" =~ $quoted_key_re ]]; then
             key="${BASH_REMATCH[1]}"
@@ -285,10 +280,17 @@ delete_group_by_pk() {
 }
 
 create_group() {
-    local pid="$1" name="$2" action="$3" resp_body pk
+    local pid="$1" name="$2" action_status="$3" resp_body pk
+
     [[ "$DRY_RUN" == true ]] && { log "  [DRY-RUN] Would create group '$name'"; echo "DRYRUN"; return 0; }
 
-    resp_body=$(api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups" "{\"name\":\"${name}\",\"action\":${action}}") || return 1
+    local json_body
+    json_body=$(jq -n --arg name "$name" --argjson status "$action_status" '{"name":$name,"action":{"status":$status}}') || {
+        log "  ERROR: Failed to build create_group JSON"
+        return 1
+    }
+
+    resp_body=$(api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups" "$json_body") || return 1
 
     pk=$(jq -r '.body.groups[0].PK // .body.groups[0].id // .body.groups[0].pk // empty' 2>/dev/null <<< "$resp_body")
     [[ -n "$pk" && "$pk" != "null" ]] && { echo "$pk"; return 0; }
@@ -300,9 +302,9 @@ create_group() {
 }
 
 add_all_rules() {
-    local pid="$1" group_id="$2" file="$3" total do_val status_val batch_num=0 added=0
+    local pid="$1" group_id="$2" file="$3" total="$4"
+    local do_val status_val batch_num=0 added=0
 
-    total=$(jq '.rules | length' "$file")
     do_val=$(jq -r '.group.action.do // .rules[0].action.do // 0' "$file")
     status_val=$(jq -r '.group.action.status // .rules[0].action.status // 1' "$file")
 
@@ -313,15 +315,93 @@ add_all_rules() {
         ((batch_num++))
         local current_batch_size=$(( total - added < BATCH_SIZE ? total - added : BATCH_SIZE ))
 
-        local hostnames body
+        local hostnames
         hostnames=$(jq --argjson start "$added" --argjson count "$current_batch_size" '[.rules[$start:$start+$count][].PK]' "$file")
-        body="{\"do\":${do_val},\"status\":${status_val},\"group\":${group_id},\"hostnames\":${hostnames}}"
+        local body="{\"do\":${do_val},\"status\":${status_val},\"group\":${group_id},\"hostnames\":${hostnames}}"
 
         api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/rules" "$body" >/dev/null || { log "    ERROR: Batch $batch_num failed"; return 1; }
         ((added += current_batch_size))
         log "    Batch $batch_num: $added/$total rules added"
     done
     log "  OK: All $total rules added"; return 0
+}
+
+# ---------------------------------------------------------------------------
+# GROUP BACKUP / RESTORE (Fallback)
+# ---------------------------------------------------------------------------
+
+backup_group_rules() {
+    local pid="$1" group_pk="$2" output_file="$3" fallback_name="$4"
+    local resp_body rules_count success_val
+
+    resp_body=$(api_call_with_retry "GET" "${API_BASE}/profiles/${pid}/rules/${group_pk}") || {
+        log "  WARN: Backup GET failed for group PK $group_pk"
+        return 1
+    }
+
+    success_val=$(jq -r '.success // "true"' 2>/dev/null <<< "$resp_body")
+    [[ "$success_val" == "false" ]] && { log "  WARN: API success=false"; return 1; }
+
+    rules_count=$(jq -r '
+        if .body | type == "array" then (.body | length)
+        elif .body.rules | type == "array" then (.body.rules | length // 0)
+        else 0 end
+    ' 2>/dev/null <<< "$resp_body")
+
+    [[ "$rules_count" =~ ^[0-9]+$ ]] || { log "  WARN: Invalid count"; return 1; }
+
+    jq --arg name "$fallback_name" '
+        (.body | type) as $bt |
+        (if $bt == "array" then (.body[0] // {}) else ((.body.rules // [])[0] // {}) end) as $first |
+        {
+            group: {
+                group: $name,
+                status: ($first.action.status // 1),
+                action: {
+                    do: ($first.action.do // 0),
+                    status: ($first.action.status // 1)
+                }
+            },
+            rules: [
+                (if $bt == "array" then .body[] else (.body.rules // [])[] end) |
+                select(.PK != null) |
+                {PK: .PK, action: .action}
+            ]
+        }
+    ' 2>/dev/null <<< "$resp_body" > "$output_file" || {
+        log "  WARN: Backup jq failed"; return 1
+    }
+
+    log "  Backup OK: $rules_count rules saved"
+    return 0
+}
+
+restore_group_from_backup() {
+    local pid="$1" backup_file="$2"
+    local name status_val total_rules group_id
+
+    [[ ! -f "$backup_file" ]] && { log "  ERROR: Backup file missing"; return 1; }
+
+    name=$(jq -r '.group.group' "$backup_file")
+    status_val=$(jq -r '.group.action.status // .group.status // 1' "$backup_file")
+    total_rules=$(jq '.rules | length' "$backup_file")
+
+    log "  Restoring group '$name' ($total_rules rules) from backup..."
+
+    group_id=$(create_group "$pid" "$name" "$status_val") || { log "  ERROR: Failed to recreate group"; return 1; }
+    [[ -z "$group_id" || "$group_id" == "null" ]] && { log "  ERROR: Got empty group ID during restore"; return 1; }
+
+    if [[ "$total_rules" -gt 0 ]]; then
+        add_all_rules "$pid" "$group_id" "$backup_file" "$total_rules" || {
+            log "  WARN: Group restored but rule re-injection failed, cleaning up..."
+            delete_group_by_pk "$pid" "$group_id" 2>/dev/null || true
+            return 1
+        }
+    fi
+
+    log "  OK: Group restored from backup (PK: $group_id)"
+    echo "$group_id"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -496,32 +576,82 @@ profile_exists() {
     return 1
 }
 
+# ---------------------------------------------------------------------------
+# SYNC WITH BACKUP/RESTORE FALLBACK
+# ---------------------------------------------------------------------------
+
 sync_folder() {
-    local pname="$1" pid="$2" fname="$3" cachefile="$4" groups_json="$5" existing_pk group_id
+    local pname="$1" pid="$2" fname="$3" cachefile="$4" groups_json="$5"
+    local existing_pk group_id backup_file name total_rules action_status restored_id
     log "  Folder: $fname"
 
-    [[ ! -f "$cachefile" ]] && { log "  ERROR: Cached file missing"; return 1; }
-
-    local name action
-    name=$(jq -r '.group.group' "$cachefile")
-    action=$(jq -c '.group.action' "$cachefile")
-
-    existing_pk=$(find_group_pk_by_name "$groups_json" "$name")
-    [[ -n "$existing_pk" && "$existing_pk" != "null" ]] && {
-        log "  Found existing '$name' (PK: $existing_pk), replacing..."
-        delete_group_by_pk "$pid" "$existing_pk" || log "  WARN: Delete returned non-2xx"
+    [[ ! -f "$cachefile" ]] && {
+        log "  ERROR: Cached file missing"
+        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Cache missing | - |" >> "$SUMMARY_FILE"
+        return 1
     }
 
-    group_id=$(create_group "$pid" "$name" "$action") || return 1
-    [[ -z "$group_id" || "$group_id" == "null" ]] && { log "  ERROR: Got empty group ID"; return 1; }
+    name=$(jq -r '.group.group' "$cachefile")
+    total_rules=$(jq '.rules | length' "$cachefile")
+
+    existing_pk=$(find_group_pk_by_name "$groups_json" "$name")
+
+    # --- BACKUP EXISTING GROUP BEFORE TOUCHING ANYTHING ---
+    if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
+        backup_file="$TMPDIR/backup_${existing_pk}.json"
+        if backup_group_rules "$pid" "$existing_pk" "$backup_file" "$name"; then
+            log "  Backup ready: $backup_file"
+        else
+            log "  WARN: Backup failed, proceeding without fallback"
+            backup_file=""
+        fi
+    fi
+    # -------------------------------------------------------
+
+    # Delete old group
+    if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
+        log "  Deleting old '$name' (PK: $existing_pk)..."
+        delete_group_by_pk "$pid" "$existing_pk" || log "  WARN: Delete returned non-2xx"
+    fi
+
+    # Create new group
+    action_status=$(jq -r '.group.action.status // .group.status // .rules[0].action.status // 1' "$cachefile")
+    group_id=$(create_group "$pid" "$name" "$action_status")
+    if [[ $? -ne 0 || -z "$group_id" || "$group_id" == "null" ]]; then
+        log "  ERROR: Group creation failed"
+        if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+            log "  Attempting restore from backup..."
+            restored_id=$(restore_group_from_backup "$pid" "$backup_file")
+            if [[ $? -eq 0 && -n "$restored_id" && "$restored_id" != "null" ]]; then
+                log "  OK: Fallback restore complete (PK: $restored_id)"
+            else
+                log "  ERROR: Fallback restore also failed"
+            fi
+        fi
+        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Create failed | - |" >> "$SUMMARY_FILE"
+        return 1
+    fi
 
     log "  Group created (ID: $group_id)"
 
-    if add_all_rules "$pid" "$group_id" "$cachefile"; then
+    # Inject rules
+    if add_all_rules "$pid" "$group_id" "$cachefile" "$total_rules"; then
         log "  OK: Folder synced"
+        [[ -n "$backup_file" && -f "$backup_file" ]] && rm -f "$backup_file"
+        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ✅ Success | $total_rules |" >> "$SUMMARY_FILE"
         return 0
     else
-        log "  WARN: Group created but rules failed"
+        log "  WARN: Group created but rules failed, attempting restore..."
+        [[ "$DRY_RUN" != true ]] && delete_group_by_pk "$pid" "$group_id" 2>/dev/null || true
+        if [[ -n "$backup_file" && -f "$backup_file" ]]; then
+            restored_id=$(restore_group_from_backup "$pid" "$backup_file")
+            if [[ $? -eq 0 && -n "$restored_id" && "$restored_id" != "null" ]]; then
+                log "  OK: Fallback restore complete (PK: $restored_id)"
+            else
+                log "  ERROR: Fallback restore also failed"
+            fi
+        fi
+        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Rules failed | - |" >> "$SUMMARY_FILE"
         return 1
     fi
 }
@@ -545,6 +675,19 @@ main() {
     fi
 
     [[ -z "$API_TOKEN" ]] && { log "ERROR: API token required."; exit 1; }
+
+    # Security: Mask the ControlD API token in GitHub Actions logs
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        echo "::add-mask::$API_TOKEN"
+        
+        # QoL: Setup GitHub Actions Workflow Summary markdown table
+        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+            SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
+            echo "### ControlD Hagezi Sync Report 🚀" >> "$SUMMARY_FILE"
+            echo "| Profile | Folder | Status | Rules |" >> "$SUMMARY_FILE"
+            echo "|---|---|---|---|" >> "$SUMMARY_FILE"
+        fi
+    fi
 
     log "========================================"
     log "ControlD Sync v${VERSION}"

@@ -1,0 +1,32 @@
+name: Check HaGeZi Updates
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore HaGeZi content cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/controld-hagezi-sync
+          key: hagezi-content-${{ github.run_id }}
+          restore-keys: hagezi-content-
+
+      - name: Check for upstream changes
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./sync-hagezi.sh --check-updates --no-freshness
+
+      - name: Trigger sync workflow
+        if: success()
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: sync.yml
+          token: ${{ secrets.GITHUB_TOKEN }}

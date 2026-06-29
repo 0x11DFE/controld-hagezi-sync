@@ -27,6 +27,7 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 | **List discovery**                   | Yes (`--list-hagezi`)                          | No                             | Yes (`make list`)                      | No                                              |
 | **Smart triggering / Change detection** | **Strong** (persistent content cache + early exit) | Partial (rule dedup)      | **Strong** (release + content check)   | No                                              |
 | **Zero-cost no-op syncs**            | Yes (content `cmp` + early exit)               | No                             | Yes                                    | No                                              |
+| **Hourly update checker**            | Yes (`--check-updates` + cron workflow)        | No                             | No                                     | No                                              |
 | **Local CLI experience**             | Excellent                                      | Good                           | Good                                   | Good (container)                                |
 | **Setup simplicity (Actions)**       | Good (TOML + secret)                           | Medium                         | **Best** (secrets only)                | Medium (K8s)                                    |
 | **Rule batching + Retries**          | 500 + retries + mixed-action support           | 500 + retries                  | 500 + retries                          | 500 (paginated)                                 |
@@ -44,6 +45,7 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 
 - Downloads the latest HaGeZi blocklist folder definitions (JSON)
 - **Content-aware caching:** Compares downloaded JSON against a persistent cache. If unchanged, skips all ControlD API calls entirely -- zero-cost no-op syncs
+- **Hourly change detection:** A separate scheduled workflow checks for upstream changes every hour and auto-triggers the sync only when needed
 - Backs up existing folders before deletion (automatic fallback on failure)
 - Deletes existing folders in your ControlD profiles (by PK)
 - Recreates them with fresh rules, batched in groups of 500
@@ -126,7 +128,7 @@ All behavior is driven by `config.toml`.
 |---|---|---|
 | `[settings]` | `api_token` | ControlD API Write Token. Prefer `CONTROLD_API_TOKEN` env var. |
 | `[settings]` | `dry_run` | Set to `true` to preview without changes. |
-| `[settings]` | `show_freshness` | Set to `false` to skip the upstream freshness report after sync. Useful in CI to avoid GitHub\'s unauthenticated rate limit (60 req/hr). |
+| `[settings]` | `show_freshness` | Set to `false` to skip the upstream freshness report after sync. Useful in CI to avoid GitHub's unauthenticated rate limit (60 req/hr). |
 | `[profiles]` | `names` | Array of exact ControlD profile names to sync. |
 | `[folders]` | `"Name"` | Maps a friendly folder name to its HaGeZi JSON URL. |
 | `[profile_folders]` | `` | Array of folder names to sync to that profile. |
@@ -171,6 +173,7 @@ Tesla = ["Badware Hoster", "My Custom List"]
  --profile NAME     Sync only one profile
  --list-hagezi      List available HaGeZi folders (ready for config.toml)
  --last-updated     Show the last updated date for configured folders and exit
+ --check-updates    Check if upstream folders changed, exit 0 if yes, 1 if no
  --no-freshness     Skip the upstream freshness report at end of sync
  --no-cache         Ignore persistent cache, always download fresh lists
  -h, --help         Show help
@@ -193,6 +196,9 @@ CONFIG_FILE=prod.toml ./sync-hagezi.sh
 
 # Check upstream freshness without syncing
 ./sync-hagezi.sh --last-updated
+
+# Check if updates are available (exit 0 = yes, 1 = no)
+./sync-hagezi.sh --check-updates
 
 # Skip freshness report (CI-friendly)
 ./sync-hagezi.sh --no-freshness
@@ -243,15 +249,16 @@ After the run completes, open the **Summary** tab on the workflow run page to se
 2. Fetches your ControlD profile list to resolve names to IDs.
 3. Downloads each HaGeZi folder JSON once (cached per run).
 4. **Content-aware change detection:** Compares freshly downloaded JSON against a persistent cache using `cmp -s` (POSIX byte comparison). If identical, the folder is marked unchanged and all ControlD API operations for it are skipped.
-5. For each profile, **backs up existing folders** before deletion.
-6. Deletes existing folders by PK, then recreates them with fresh rules.
-7. Rules are inserted in batches of 500 using **jq-native JSON construction** for robust, injection-safe payloads.
-8. If rule injection fails, **automatically restores the original folder from backup**.
-9. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
-10. **Memory-efficient merges:** During backup fallback, the script streams source JSON via `jq input` instead of `--slurpfile`, cutting memory usage from 3-5x to 1-2x file size.
-11. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
-12. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
-13. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
+5. **Hourly update checker:** A separate cron workflow runs `--check-updates` every hour. If upstream changed, it auto-triggers the sync workflow. No wasted API calls on quiet days.
+6. For each profile, **backs up existing folders** before deletion.
+7. Deletes existing folders by PK, then recreates them with fresh rules.
+8. Rules are inserted in batches of 500 using **jq-native JSON construction** for robust, injection-safe payloads.
+9. If rule injection fails, **automatically restores the original folder from backup**.
+10. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
+11. **Memory-efficient merges:** During backup fallback, the script streams source JSON via `jq input` instead of `--slurpfile`, cutting memory usage from 3-5x to 1-2x file size.
+12. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
+13. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
+14. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
 
 > **Note on caching:** GitHub raw URLs (`raw.githubusercontent.com`) do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, add `actions/cache` to persist the cache directory between runs.
 
@@ -278,15 +285,15 @@ It does **not** support:
 
 ## Known Limitations
 
-- **Destructive sync:** Folders are deleted and recreated. An interrupted sync may leave a profile without that folder\'s rules until the next run.
-- **No rule-level diff:** We don\'t compare individual rules against the existing folder. If HaGeZi\'s JSON hasn\'t changed, we still delete and recreate.
+- **Destructive sync:** Folders are deleted and recreated. An interrupted sync may leave a profile without that folder's rules until the next run.
+- **No rule-level diff:** We don't compare individual rules against the existing folder. If HaGeZi's JSON hasn't changed, we still delete and recreate.
 - **Bash TOML parser:** See [TOML Parser Limitations](#toml-parser-limitations) above.
 
 ---
 
 ## Roadmap
 
-- [ ] `--check-update` — skip sync if HaGeZi lists haven\'t changed (high priority) ✅ *Implemented via content cache in v1.6.2*
+- [x] `--check-updates` — skip sync if HaGeZi lists haven't changed (high priority) ✅ *Implemented in v1.6.4*
 - [ ] Optional atomic two-phase sync (blocked by ControlD API improvements)
 
 ---

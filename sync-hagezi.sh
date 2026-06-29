@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 1.6.3
+# Version: 1.6.4
 # Description: Syncs HaGeZi DNS blocklist folders to ControlD profiles.
 #              Features automatic backup/restore fallback for safe rule
 #              replacements. Pure Bash. No Python. TOML-driven configuration.
@@ -12,7 +12,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="1.6.3"
+VERSION="1.6.4"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -41,6 +41,7 @@ declare -A FOLDER_CHANGED  # Tracks changed vs unchanged per folder
 DRY_RUN=false
 ACTION_LAST_UPDATED=false
 SHOW_FRESHNESS=true
+CHECK_UPDATES=false
 NO_CACHE=false
 TARGET_PROFILE=""
 SUCCESS_COUNT=0
@@ -705,6 +706,7 @@ Options:
   --list-hagezi      List available HaGeZi folders (ready for config.toml)
   --last-updated     Show the last updated date for configured folders and exit
   --no-freshness     Skip the upstream freshness report at end of sync
+  --check-updates    Check if upstream folders changed, exit 0 if yes, 1 if no
   --no-cache         Ignore persistent cache, always download fresh lists
   -h, --help         Show this help message and exit
 
@@ -736,6 +738,7 @@ parse_args() {
             --list-hagezi) check_deps; list_hagezi; exit 0 ;;
             --last-updated) ACTION_LAST_UPDATED=true; shift ;;
             --no-freshness) SHOW_FRESHNESS=false; shift ;;
+            --check-updates) CHECK_UPDATES=true; shift ;;
             --no-cache) NO_CACHE=true; shift ;;
             -h|--help|-help) show_help; exit 0 ;;
             *) log "WARN: Unknown argument: $1"; shift ;;
@@ -769,13 +772,6 @@ summary_row() {
     fi
 
     echo "| $profile | $folder | $status | $rules |" >> "$SUMMARY_FILE"
-}
-
-summary_header() {
-    [[ -z "$SUMMARY_FILE" ]] && return
-    echo "### ControlD HaGeZi Sync Report 🚀" >> "$SUMMARY_FILE"
-    echo "| Profile | Folder | Status | Rules |" >> "$SUMMARY_FILE"
-    echo "|---|---|---|---|" >> "$SUMMARY_FILE"
 }
 
 # ---------------------------------------------------------------------------
@@ -997,6 +993,17 @@ main() {
     done
 
     log "Download complete: $downloaded new, $skipped unchanged, $failed failed"
+
+    # --- Check-updates mode: exit early, no ControlD API calls ---
+    if [[ "$CHECK_UPDATES" == true ]]; then
+        if [[ "$downloaded" -gt 0 ]]; then
+            log "UPDATES AVAILABLE: $downloaded folder(s) changed upstream"
+            exit 0
+        else
+            log "No updates available"
+            exit 1
+        fi
+    fi
 
     # --- Early exit if nothing changed ---
     if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then

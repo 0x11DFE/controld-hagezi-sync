@@ -1,11 +1,11 @@
 # ControlD Hagezi Sync
 
-![GitHub stars](https://img.shields.io/github/stars/0x11DFE/controld-hagezi-sync?style=flat-square)
-![License](https://img.shields.io/github/license/0x11DFE/controld-hagezi-sync?style=flat-square)
-![Language](https://img.shields.io/badge/language-Bash-4EAA25?style=flat-square&logo=gnu-bash)
-![GitHub Actions](https://img.shields.io/github/actions/workflow/status/0x11DFE/controld-hagezi-sync/sync.yml?style=flat-square&label=CI)
-![Last Commit](https://img.shields.io/github/last-commit/0x11DFE/controld-hagezi-sync?style=flat-square)
-![Issues](https://img.shields.io/github/issues/0x11DFE/controld-hagezi-sync?style=flat-square)
+[![GitHub stars](https://img.shields.io/github/stars/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/stargazers)
+[![License](https://img.shields.io/github/license/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/blob/main/LICENSE)
+[![Language](https://img.shields.io/badge/language-Bash-4EAA25?style=flat-square&logo=gnu-bash)](https://www.gnu.org/software/bash/)
+[![GitHub Actions](https://img.shields.io/github/actions/workflow/status/0x11DFE/controld-hagezi-sync/sync.yml?style=flat-square&label=CI)](https://github.com/0x11DFE/controld-hagezi-sync/actions/workflows/sync.yml)
+[![Last Commit](https://img.shields.io/github/last-commit/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/commits/main)
+[![Issues](https://img.shields.io/github/issues/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/issues)
 
 > **Zero-dependency Bash with TOML power.** No Python virtualenvs, no Go binaries, no opaque profile IDs. Write human-readable profile names, mix-and-match folders per profile, dry-run before you push, and know exactly how fresh your blocklists are.
 
@@ -30,7 +30,7 @@ Automatically sync Hagezi DNS blocklists to your ControlD profiles via the Contr
 | **Setup simplicity (Actions)** | Edit TOML + commit + secret                       | Edit Python file + secrets                                 | **Easiest**: Just add secrets (no config commit)                               | CLI args / Kubernetes manifests                                          |
 | **Rule batching**              | 500 rules (with retries)                          | 500 rules (with retries)                                   | 500 rules (with retries)                                                       | Deletes + re-imports (batching assumed)                                  |
 | **Backup/restore fallback**    | :white_check_mark: Automatic                      | :x: No                                                     | :x: No                                                                         | :x: No                                                                   |
-| **GitHub Actions summary**     | :white_check_mark: Markdown table                 | :x: No                                                     | :x: No                                                                         | :x: No                                                                   |
+| **GitHub Actions summary**     | :white_check_mark: Markdown table + freshness     | :x: No                                                     | :x: No                                                                         | :x: No                                                                   |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
 
@@ -48,7 +48,6 @@ Automatically sync Hagezi DNS blocklists to your ControlD profiles via the Contr
 - Runs on a schedule or on-demand via GitHub Actions
 - **Dry-run mode** to preview changes before they go live
 - **Freshness report** showing when each Hagezi list was last updated on GitHub
-- **GitHub Actions summary** with a markdown table of sync results
 
 ---
 
@@ -204,11 +203,10 @@ When running manually via **Actions -> Run workflow**, you can specify:
 | `profile` | Sync only a specific profile (leave empty for all) |
 | `dry_run` | Check the box to run in preview mode |
 
-After the run completes, open the **Summary** tab to see a markdown table with:
-- Profile name
-- Folder name
-- Status (success/failure emoji)
-- Rule count
+After the run completes, open the **Summary** tab on the workflow run page to see:
+
+1. **Sync Results** — a markdown table with profile, folder, status (✅/❌), and rule count
+2. **Upstream Freshness** — when each Hagezi list was last updated on GitHub (relative time + UTC)
 
 ---
 
@@ -238,8 +236,8 @@ After the run completes, open the **Summary** tab to see a markdown table with:
 5. Deletes existing folders by PK, then recreates them with fresh rules.
 6. Rules are inserted in batches of 500 to stay within API limits.
 7. If rule injection fails, **automatically restores the original folder from backup**.
-8. In GitHub Actions, generates a **markdown summary table** on the workflow run page.
-9. Prints a freshness report showing when each Hagezi list was last updated on GitHub.
+8. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness
+9. Prints a freshness report showing when each Hagezi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab)
 
 ---
 

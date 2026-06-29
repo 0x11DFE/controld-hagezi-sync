@@ -965,9 +965,6 @@ main() {
     [[ "$NO_CACHE" == true ]] && log "MODE: NO-CACHE"
     log "========================================"
 
-    local ALL_PROFILES
-    ALL_PROFILES=$(get_all_profiles) || exit 1
-
     # --- Download phase ---
     log "Pre-downloading HaGeZi folder data..."
     local fname cachefile dl_status
@@ -1004,6 +1001,9 @@ main() {
             exit 1
         fi
     fi
+
+    local ALL_PROFILES
+    ALL_PROFILES=$(get_all_profiles) || exit
 
     # --- Early exit if nothing changed ---
     if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then

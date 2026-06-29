@@ -15,24 +15,24 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 
 ## Why this one?
 
-| Feature | **0x11DFE/controld-hagezi-sync** | **keksiqc/ctrld-sync** | **italorgama/ctrld-hagezi-sync** | **tupcakes/controld-updater** |
-|---|---|---|---|---|
+| Feature | [0x11DFE/controld-hagezi-sync](https://github.com/0x11DFE/controld-hagezi-sync) | [keksiqc/ctrld-sync](https://github.com/keksiqc/ctrld-sync) | [italorgama/ctrld-hagezi-sync](https://github.com/italorgama/ctrld-hagezi-sync) | [tupcakes/controld-updater](https://github.com/tupcakes/controld-updater) |
+|:---|:---|:---|:---|:---|
 | **Language** | Bash (`curl` + `jq`) | Python 3 | Go (single binary) | Python + Docker |
 | **Config format** | TOML (human friendly + comments) | Hardcoded + `.env` | `lists.txt` | CLI / config file |
 | **Profile targeting** | By **name** (human-readable) | By **ID** | By **ID** | By **ID** |
-| **Per-profile folder sets** | Yes (highly flexible) | No | No | No |
-| **Dry-run** | Yes (`--dry-run`) | No | No | No |
-| **Single-profile sync** | Yes (`--profile`) | Yes | Yes | Yes |
-| **Freshness report** | Yes (detailed + GitHub summary) | No | Basic | No |
-| **List discovery** | Yes (`--list-hagezi`) | No | Yes (`make list`) | No |
-| **Smart change detection** | Strong (persistent content `cmp` cache) | Partial | Strong | Basic |
-| **Atomic swaps + Rollback** | **Yes (v2.0.0)** | No | No | No |
-| **Rule handling** | Full folder import (atomic) | Rule-by-rule (batched) | Folder import | Batched |
-| **Backup/restore fallback** | Yes (automatic, robust) | No | No | No |
-| **Zero-cost no-op runs** | Yes (early exit on unchanged content) | No | Yes | No |
-| **Hourly update checker** | Yes (`--check-updates` + cron) | No | No | No |
-| **GitHub Actions summary** | Rich markdown + freshness | Basic logs | Good | None |
-| **Local CLI experience** | Excellent (many flags) | Good | Good | Container-focused |
+| **Per-profile folder sets** | ✅ Yes (highly flexible) | ❌ No | ❌ No | ❌ No |
+| **Dry-run** | ✅ Yes (`--dry-run`) | ❌ No | ❌ No | ❌ No |
+| **Single-profile sync** | ✅ Yes (`--profile`) | ✅ Yes | ✅ Yes | ✅ Yes |
+| **Freshness report** | ✅ Yes (detailed + GitHub summary) | ❌ No | ⚠️ Basic | ❌ No |
+| **List discovery** | ✅ Yes (`--list-hagezi`) | ❌ No | ✅ Yes (`make list`) | ❌ No |
+| **Smart change detection** | ✅ Strong (persistent content `cmp` cache) | ⚠️ Partial | ✅ Strong | ⚠️ Basic |
+| **Atomic swaps + Rollback** | ✅ **Yes (v2.0.0)** | ❌ No | ❌ No | ❌ No |
+| **Rule handling** | ✅ Full folder import (atomic) | ❌ Rule-by-rule (batched) | ✅ Folder import | ❌ Batched |
+| **Backup/restore fallback** | ✅ Yes (automatic, robust) | ❌ No | ❌ No | ❌ No |
+| **Zero-cost no-op runs** | ✅ Yes (early exit on unchanged content) | ❌ No | ✅ Yes | ❌ No |
+| **Hourly update checker** | ✅ Yes (`--check-updates` + cron) | ❌ No | ❌ No | ❌ No |
+| **GitHub Actions summary** | ✅ Rich markdown + freshness | ⚠️ Basic logs | ⚠️ Good | ❌ None |
+| **Local CLI experience** | ✅ Excellent (many flags) | ⚠️ Good | ⚠️ Good | ⚠️ Container-focused |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
 

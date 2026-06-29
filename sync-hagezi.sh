@@ -305,8 +305,8 @@ add_all_rules() {
     local pid="$1" group_id="$2" file="$3" total="$4"
     local do_val status_val batch_num=0 added=0
 
-    do_val=$(jq -r '.group.action.do // .rules[0].action.do // 0' "$file")
-    status_val=$(jq -r '.group.action.status // .rules[0].action.status // 1' "$file")
+    do_val=$(jq -r '.group.action.do // .rules[0].action.do // 0' "$file") || { log "  ERROR: Failed to read action.do from $file"; return 1; }
+    status_val=$(jq -r '.group.action.status // .rules[0].action.status // 1' "$file") || { log "  ERROR: Failed to read action.status from $file"; return 1; }
 
     [[ "$DRY_RUN" == true ]] && { log "  [DRY-RUN] Would add $total rules"; return 0; }
     log "  Adding $total rules in batches of $BATCH_SIZE..."
@@ -411,6 +411,66 @@ restore_group_from_backup() {
 }
 
 # ---------------------------------------------------------------------------
+# TIME FORMATTING HELPERS
+# ---------------------------------------------------------------------------
+
+format_relative_time() {
+    local seconds="$1" compact="${2:-false}"
+    local unit value
+
+    if (( seconds < 60 )); then
+        unit="second"; value=$seconds
+    elif (( seconds < 3600 )); then
+        unit="minute"; value=$(( seconds / 60 ))
+    elif (( seconds < 86400 )); then
+        unit="hour"; value=$(( seconds / 3600 ))
+    else
+        unit="day"; value=$(( seconds / 86400 ))
+    fi
+
+    if [[ "$compact" == true ]]; then
+        echo "${value}${unit:0:1} ago"
+    else
+        [[ "$value" -eq 1 ]] && echo "1 ${unit} ago" || echo "${value} ${unit}s ago"
+    fi
+}
+
+format_iso_date() {
+    local iso="$1"
+    iso="${iso/T/ }"
+    echo "${iso/Z/ UTC}"
+}
+
+# ---------------------------------------------------------------------------
+# HAGEZI COMMIT FETCHER
+# ---------------------------------------------------------------------------
+
+hagezi_folder_epoch() {
+    local fname="$1"
+    local url filepath api_url resp code body date_str epoch
+    local gh_headers=(-H "Accept: application/vnd.github.v3+json" -H "User-Agent: controld-hagezi-sync/${VERSION}")
+    [[ -n "${GITHUB_TOKEN:-}" ]] && gh_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+    url="${HAGEZI_FOLDERS[$fname]}"
+    filepath="${url#*main/}"
+    api_url="https://api.github.com/repos/hagezi/dns-blocklists/commits?path=${filepath}&per_page=1"
+
+    resp=$(curl -s -w "\n%{http_code}" "${gh_headers[@]}" "$api_url")
+    code=$(tail -n1 <<< "$resp")
+    body=$(sed '$d' <<< "$resp")
+
+    [[ "$code" != "200" ]] && return 1
+
+    date_str=$(jq -r '.[0].commit.committer.date // empty' <<< "$body")
+    [[ -z "$date_str" ]] && return 1
+
+    epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
+    [[ -z "$epoch" ]] && return 1
+
+    echo "${epoch}|${date_str}"
+}
+
+# ---------------------------------------------------------------------------
 # HAGEZI GITHUB HELPERS
 # ---------------------------------------------------------------------------
 
@@ -458,69 +518,20 @@ list_hagezi() {
 
 show_last_updated() {
     log "Fetching last updated dates from GitHub API..."
-    local fname url filepath api_url resp code body date_str target_epoch seconds_diff
-    local gh_headers=(-H "Accept: application/vnd.github.v3+json" -H "User-Agent: controld-hagezi-sync/${VERSION}")
-    [[ -n "${GITHUB_TOKEN:-}" ]] && gh_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    local fname result epoch seconds_diff date_str
 
     for fname in "${!HAGEZI_FOLDERS[@]}"; do
-        url="${HAGEZI_FOLDERS[$fname]}"
-        filepath="${url#*main/}"
-
-        api_url="https://api.github.com/repos/hagezi/dns-blocklists/commits?path=${filepath}&per_page=1"
-        resp=$(curl -s -w "\n%{http_code}" "${gh_headers[@]}" "$api_url")
-        code=$(tail -n1 <<< "$resp")
-        body=$(sed '$d' <<< "$resp")
-
-        if [[ "$code" == "200" ]]; then
-            date_str=$(jq -r '.[0].commit.committer.date // empty' <<< "$body")
-            if [[ -n "$date_str" ]]; then
-                target_epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
-                if [[ -n "$target_epoch" ]]; then
-                    seconds_diff=$(( $(date +%s) - target_epoch ))
-
-                    local rel_time=""
-                    if (( seconds_diff < 60 )); then
-                        if (( seconds_diff == 1 )); then
-                            rel_time="1 second ago"
-                        else
-                            rel_time="${seconds_diff} seconds ago"
-                        fi
-                    elif (( seconds_diff < 3600 )); then
-                        local mins=$(( seconds_diff / 60 ))
-                        if (( mins == 1 )); then
-                            rel_time="1 minute ago"
-                        else
-                            rel_time="${mins} minutes ago"
-                        fi
-                    elif (( seconds_diff < 86400 )); then
-                        local hrs=$(( seconds_diff / 3600 ))
-                        if (( hrs == 1 )); then
-                            rel_time="1 hour ago"
-                        else
-                            rel_time="${hrs} hours ago"
-                        fi
-                    else
-                        local days=$(( seconds_diff / 86400 ))
-                        if (( days == 1 )); then
-                            rel_time="1 day ago"
-                        else
-                            rel_time="${days} days ago"
-                        fi
-                    fi
-
-                    local fmt_date="${date_str/T/ }"
-                    fmt_date="${fmt_date/Z/ UTC}"
-
-                    log "  $fname: $rel_time ($fmt_date)"
-                else
-                    log "  $fname: Unknown (date parse failed)"
-                fi
-            else
-                log "  $fname: Unknown (no commit date)"
-            fi
-        else
-            log "  $fname: Failed (HTTP $code)"
+        result=$(hagezi_folder_epoch "$fname")
+        if [[ -z "$result" ]]; then
+            log "  $fname: Failed"
+            continue
         fi
+
+        epoch="${result%%|*}"
+        date_str="${result#*|}"
+        seconds_diff=$(( $(date +%s) - epoch ))
+
+        log "  $fname: $(format_relative_time "$seconds_diff") ($(format_iso_date "$date_str"))"
     done
 }
 
@@ -583,6 +594,33 @@ profile_exists() {
 }
 
 # ---------------------------------------------------------------------------
+# SUMMARY HELPER
+# ---------------------------------------------------------------------------
+
+summary_row() {
+    local profile="$1" folder="$2" status="$3" rules="$4"
+    [[ -n "$SUMMARY_FILE" ]] && echo "| $profile | $folder | $status | $rules |" >> "$SUMMARY_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# RESTORE HELPER
+# ---------------------------------------------------------------------------
+
+attempt_restore() {
+    local pid="$1" backup_file="$2"
+    local restored_id
+    log "  Attempting restore from backup..."
+    restored_id=$(restore_group_from_backup "$pid" "$backup_file")
+    if [[ $? -eq 0 && -n "$restored_id" && "$restored_id" != "null" ]]; then
+        log "  OK: Fallback restore complete (PK: $restored_id)"
+        return 0
+    else
+        log "  ERROR: Fallback restore also failed"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # SYNC WITH BACKUP/RESTORE FALLBACK
 # ---------------------------------------------------------------------------
 
@@ -593,7 +631,7 @@ sync_folder() {
 
     [[ ! -f "$cachefile" ]] && {
         log "  ERROR: Cached file missing"
-        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Cache missing | - |" >> "$SUMMARY_FILE"
+        summary_row "$pname" "$fname" "❌ Cache missing" "-"
         return 1
     }
 
@@ -610,7 +648,7 @@ sync_folder() {
             backup_count=$(jq '.rules | length' "$backup_file" 2>/dev/null || echo 0)
             if [[ "$backup_count" -eq 0 ]]; then
                 log "  WARN: Backup has 0 rules (API read-after-write inconsistency?)"
-                [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ⚠️ Backup empty (0 rules) | - |" >> "$SUMMARY_FILE"
+                summary_row "$pname" "$fname" "⚠️ Backup empty (0 rules)" "-"
             else
                 log "  Backup ready: $backup_file"
             fi
@@ -632,16 +670,8 @@ sync_folder() {
     group_id=$(create_group "$pid" "$name" "$action_status")
     if [[ $? -ne 0 || -z "$group_id" || "$group_id" == "null" ]]; then
         log "  ERROR: Group creation failed"
-        if [[ -n "$backup_file" && -f "$backup_file" ]]; then
-            log "  Attempting restore from backup..."
-            restored_id=$(restore_group_from_backup "$pid" "$backup_file")
-            if [[ $? -eq 0 && -n "$restored_id" && "$restored_id" != "null" ]]; then
-                log "  OK: Fallback restore complete (PK: $restored_id)"
-            else
-                log "  ERROR: Fallback restore also failed"
-            fi
-        fi
-        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Create failed | - |" >> "$SUMMARY_FILE"
+        [[ -n "$backup_file" && -f "$backup_file" ]] && attempt_restore "$pid" "$backup_file"
+        summary_row "$pname" "$fname" "❌ Create failed" "-"
         return 1
     fi
 
@@ -651,20 +681,15 @@ sync_folder() {
     if add_all_rules "$pid" "$group_id" "$cachefile" "$total_rules"; then
         log "  OK: Folder synced"
         [[ -n "$backup_file" && -f "$backup_file" ]] && rm -f "$backup_file"
-        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ✅ Success | $total_rules |" >> "$SUMMARY_FILE"
+        summary_row "$pname" "$fname" "✅ Success" "$total_rules"
         return 0
     else
         log "  WARN: Group created but rules failed, attempting restore..."
-        [[ "$DRY_RUN" != true ]] && delete_group_by_pk "$pid" "$group_id" 2>/dev/null || true
-        if [[ -n "$backup_file" && -f "$backup_file" ]]; then
-            restored_id=$(restore_group_from_backup "$pid" "$backup_file")
-            if [[ $? -eq 0 && -n "$restored_id" && "$restored_id" != "null" ]]; then
-                log "  OK: Fallback restore complete (PK: $restored_id)"
-            else
-                log "  ERROR: Fallback restore also failed"
-            fi
+        if [[ "$DRY_RUN" != true ]]; then
+            delete_group_by_pk "$pid" "$group_id" 2>/dev/null || true
         fi
-        [[ -n "$SUMMARY_FILE" ]] && echo "| $pname | $fname | ❌ Rules failed | - |" >> "$SUMMARY_FILE"
+        [[ -n "$backup_file" && -f "$backup_file" ]] && attempt_restore "$pid" "$backup_file"
+        summary_row "$pname" "$fname" "❌ Rules failed" "-"
         return 1
     fi
 }
@@ -732,7 +757,7 @@ main() {
         log "--- Profile: $pname ($pid) ---"
 
         local PROFILE_GROUPS
-        PROFILE_GROUPS=$(get_profile_groups "$pid")
+        PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
 
         local folder_list="${PROFILE_FOLDERS[$pname]}"
         [[ -z "$folder_list" ]] && { log "  WARN: No folders mapped"; continue; }
@@ -765,47 +790,19 @@ main() {
         echo "| Folder | Last Updated |" >> "$GITHUB_STEP_SUMMARY"
         echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
 
-        local _fname _url _filepath _api_url _resp _code _body _date_str _target_epoch _seconds_diff _rel_time _fmt_date
-        local _gh_headers=(-H "Accept: application/vnd.github.v3+json" -H "User-Agent: controld-hagezi-sync/${VERSION}")
-        [[ -n "${GITHUB_TOKEN:-}" ]] && _gh_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+        local fname result epoch seconds_diff date_str
 
-        for _fname in "${!HAGEZI_FOLDERS[@]}"; do
-            _url="${HAGEZI_FOLDERS[$_fname]}"
-            _filepath="${_url#*main/}"
-            _api_url="https://api.github.com/repos/hagezi/dns-blocklists/commits?path=${_filepath}&per_page=1"
-            _resp=$(curl -s -w "\n%{http_code}" "${_gh_headers[@]}" "$_api_url")
-            _code=$(tail -n1 <<< "$_resp")
-            _body=$(sed '$d' <<< "$_resp")
-
-            if [[ "$_code" == "200" ]]; then
-                _date_str=$(jq -r '.[0].commit.committer.date // empty' <<< "$_body")
-                if [[ -n "$_date_str" ]]; then
-                    _target_epoch=$(jq -r --arg date "$_date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
-                    if [[ -n "$_target_epoch" ]]; then
-                        _seconds_diff=$(( $(date +%s) - _target_epoch ))
-
-                        if (( _seconds_diff < 60 )); then
-                            _rel_time="${_seconds_diff}s ago"
-                        elif (( _seconds_diff < 3600 )); then
-                            _rel_time="$(( _seconds_diff / 60 ))m ago"
-                        elif (( _seconds_diff < 86400 )); then
-                            _rel_time="$(( _seconds_diff / 3600 ))h ago"
-                        else
-                            _rel_time="$(( _seconds_diff / 86400 ))d ago"
-                        fi
-
-                        _fmt_date="${_date_str/T/ }"
-                        _fmt_date="${_fmt_date/Z/ UTC}"
-                        echo "| $_fname | $_rel_time ($_fmt_date) |" >> "$GITHUB_STEP_SUMMARY"
-                    else
-                        echo "| $_fname | Unknown (parse failed) |" >> "$GITHUB_STEP_SUMMARY"
-                    fi
-                else
-                    echo "| $_fname | Unknown (no date) |" >> "$GITHUB_STEP_SUMMARY"
-                fi
-            else
-                echo "| $_fname | Failed (HTTP $_code) |" >> "$GITHUB_STEP_SUMMARY"
+        for fname in "${!HAGEZI_FOLDERS[@]}"; do
+            result=$(hagezi_folder_epoch "$fname")
+            if [[ -z "$result" ]]; then
+                echo "| $fname | Failed |" >> "$GITHUB_STEP_SUMMARY"
+                continue
             fi
+
+            epoch="${result%%|*}"
+            date_str="${result#*|}"
+            seconds_diff=$(( $(date +%s) - epoch ))
+            echo "| $fname | $(format_relative_time "$seconds_diff" true) ($(format_iso_date "$date_str")) |" >> "$GITHUB_STEP_SUMMARY"
         done
     fi
 
@@ -816,7 +813,7 @@ main() {
         show_last_updated
     fi
 
-    [[ $FAILED_COUNT -gt 0 ]] && exit 1 || exit 0
+    exit $(( FAILED_COUNT > 0 ))
 }
 
 main "$@"

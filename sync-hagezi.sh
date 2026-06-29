@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 1.6.2
+# Version: 1.6.3
 # Description: Syncs HaGeZi DNS blocklist folders to ControlD profiles.
 #              Features automatic backup/restore fallback for safe rule
 #              replacements. Pure Bash. No Python. TOML-driven configuration.
@@ -12,7 +12,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="1.6.2"
+VERSION="1.6.3"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -751,6 +751,7 @@ profile_exists() {
     return 1
 }
 
+
 # ---------------------------------------------------------------------------
 # SUMMARY HELPER
 # ---------------------------------------------------------------------------
@@ -758,6 +759,66 @@ profile_exists() {
 summary_row() {
     local profile="$1" folder="$2" status="$3" rules="$4"
     [[ -n "$SUMMARY_FILE" ]] && echo "| $profile | $folder | $status | $rules |" >> "$SUMMARY_FILE"
+}
+
+summary_header() {
+    [[ -z "$SUMMARY_FILE" ]] && return
+    echo "### ControlD HaGeZi Sync Report 🚀" >> "$SUMMARY_FILE"
+    echo "| Profile | Folder | Status | Rules |" >> "$SUMMARY_FILE"
+    echo "|---|---|---|---|" >> "$SUMMARY_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# FRESHNESS REPORT
+# ---------------------------------------------------------------------------
+
+print_freshness_report() {
+    [[ "$SHOW_FRESHNESS" != true ]] && return
+
+    local epoch seconds_diff date_str fname result
+    local -a lines=()
+
+    for fname in "${!HAGEZI_FOLDERS[@]}"; do
+        result=$(hagezi_folder_epoch "$fname")
+        if [[ -z "$result" ]]; then
+            lines+=("| $fname | Failed |")
+            continue
+        fi
+        epoch="${result%%|*}"
+        date_str="${result#*|}"
+        seconds_diff=$(( $(date +%s) - epoch ))
+        lines+=("| $fname | $(format_relative_time "$seconds_diff" true) ($(format_iso_date "$date_str")) |")
+    done
+
+    # GitHub Actions summary
+    if [[ -n "$SUMMARY_FILE" ]]; then
+        {
+            echo ""
+            echo "---"
+            echo ""
+            echo "### Upstream Freshness (HaGeZi GitHub) 🕐"
+            echo ""
+            echo "| Folder | Last Updated |"
+            echo "|---|---|"
+            printf '%s\n' "${lines[@]}"
+        } >> "$SUMMARY_FILE"
+        return
+    fi
+
+    # Terminal output
+    log ""
+    log "--- Upstream Freshness (GitHub) ---"
+    for fname in "${!HAGEZI_FOLDERS[@]}"; do
+        result=$(hagezi_folder_epoch "$fname")
+        if [[ -z "$result" ]]; then
+            log "  $fname: Failed"
+            continue
+        fi
+        epoch="${result%%|*}"
+        date_str="${result#*|}"
+        seconds_diff=$(( $(date +%s) - epoch ))
+        log "  $fname: $(format_relative_time "$seconds_diff") ($(format_iso_date "$date_str"))"
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -873,32 +934,22 @@ main() {
 
     [[ -z "$API_TOKEN" ]] && { log "ERROR: API token required."; exit 1; }
 
-    # Security: Mask the ControlD API token in GitHub Actions logs
+    # --- GitHub Actions setup (single place) ---
     if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
         echo "::add-mask::$API_TOKEN"
-
-        # QoL: Setup GitHub Actions Workflow Summary markdown table
-        if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-            SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
-            echo "### ControlD HaGeZi Sync Report 🚀" >> "$SUMMARY_FILE"
-            echo "| Profile | Folder | Status | Rules |" >> "$SUMMARY_FILE"
-            echo "|---|---|---|---|" >> "$SUMMARY_FILE"
-        fi
+        [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] && SUMMARY_FILE="$GITHUB_STEP_SUMMARY"
     fi
 
-    # Initialize temp directory early for reusable API call files
+    # Initialize temp directory
     TMPDIR=$(mktemp -d)
     trap '[[ -n "${TMPDIR:-}" ]] && rm -rf "$TMPDIR"' EXIT
     mkdir -p "$TMPDIR/cache"
 
-    # Initialize persistent cache for content comparison
+    # Cache setup
     mkdir -p "$SYNC_CACHE"
-    # Cache version check: invalidate if script format changed
-    if [[ -f "$SYNC_CACHE/.version" ]]; then
-        [[ "$(cat "$SYNC_CACHE/.version")" != "$CACHE_VERSION" ]] && {
-            log "Cache format changed (v$(cat "$SYNC_CACHE/.version") -> v$CACHE_VERSION), clearing old cache..."
-            rm -rf "$SYNC_CACHE"/*
-        }
+    if [[ -f "$SYNC_CACHE/.version" && "$(cat "$SYNC_CACHE/.version")" != "$CACHE_VERSION" ]]; then
+        log "Cache format changed (v$(cat "$SYNC_CACHE/.version") -> v$CACHE_VERSION), clearing old cache..."
+        rm -rf "$SYNC_CACHE"/*
     fi
     echo "$CACHE_VERSION" > "$SYNC_CACHE/.version"
 
@@ -911,13 +962,13 @@ main() {
     local ALL_PROFILES
     ALL_PROFILES=$(get_all_profiles) || exit 1
 
+    # --- Download phase ---
     log "Pre-downloading HaGeZi folder data..."
     local fname cachefile dl_status
     local -i skipped=0 downloaded=0 failed=0
 
     for fname in "${!HAGEZI_FOLDERS[@]}"; do
         cachefile="$TMPDIR/cache/${fname// /_}.json"
-
         download_folder_smart "${HAGEZI_FOLDERS[$fname]}" "$cachefile" "$fname"
         dl_status=$?
 
@@ -937,20 +988,25 @@ main() {
 
     log "Download complete: $downloaded new, $skipped unchanged, $failed failed"
 
-    # Early exit if nothing changed
+    # --- Summary header (always, before any early exit) ---
+    summary_header
+
+    # --- Early exit if nothing changed ---
     if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then
         log "All folders unchanged upstream. Nothing to sync."
         log "========================================"
         log "Sync Complete: 0 changes needed"
         log "========================================"
+        print_freshness_report
         exit 0
     fi
 
+    # --- Sync phase ---
     local pname pid
     for pname in "${PROFILE_NAMES[@]}"; do
         [[ -n "$TARGET_PROFILE" && "$pname" != "$TARGET_PROFILE" ]] && continue
-        pid=$(find_profile_id "$ALL_PROFILES" "$pname")
 
+        pid=$(find_profile_id "$ALL_PROFILES" "$pname")
         [[ -z "$pid" || "$pid" == "null" ]] && { log ""; log "--- Profile: $pname ---"; log "  ERROR: Profile not found"; continue; }
 
         log ""
@@ -965,7 +1021,6 @@ main() {
         local f
         IFS='|' read -ra TO_SYNC <<< "$folder_list"
         for f in "${TO_SYNC[@]}"; do
-            # Skip folders that failed download or haven't changed
             [[ "${FOLDER_CHANGED[$f]}" == "false" ]] && {
                 log "  Folder: $f — unchanged upstream, skipping sync"
                 summary_row "$pname" "$f" "⏭️ Unchanged" "-"
@@ -987,38 +1042,7 @@ main() {
     log "Sync Complete: $SUCCESS_COUNT succeeded, $FAILED_COUNT failed"
     log "========================================"
 
-    # Add upstream freshness to GitHub Actions summary
-    if [[ -n "${GITHUB_STEP_SUMMARY:-}" && "$SHOW_FRESHNESS" == true ]]; then
-        echo "" >> "$SUMMARY_FILE"
-        echo "---" >> "$SUMMARY_FILE"
-        echo "" >> "$SUMMARY_FILE"
-        echo "### Upstream Freshness (HaGeZi GitHub) 🕐" >> "$SUMMARY_FILE"
-        echo "" >> "$SUMMARY_FILE"
-        echo "| Folder | Last Updated |" >> "$SUMMARY_FILE"
-        echo "|---|---|" >> "$SUMMARY_FILE"
-
-        local fname result epoch seconds_diff date_str
-
-        for fname in "${!HAGEZI_FOLDERS[@]}"; do
-            result=$(hagezi_folder_epoch "$fname")
-            if [[ -z "$result" ]]; then
-                echo "| $fname | Failed |" >> "$SUMMARY_FILE"
-                continue
-            fi
-
-            epoch="${result%%|*}"
-            date_str="${result#*|}"
-            seconds_diff=$(( $(date +%s) - epoch ))
-            echo "| $fname | $(format_relative_time "$seconds_diff" true) ($(format_iso_date "$date_str")) |" >> "$SUMMARY_FILE"
-        done
-    fi
-
-    # Only print to stdout if not in Actions (summary already has it)
-    if [[ "$SHOW_FRESHNESS" == true && -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
-        log ""
-        log "--- Upstream Freshness (GitHub) ---"
-        show_last_updated
-    fi
+    print_freshness_report
 
     exit $(( FAILED_COUNT > 0 ))
 }

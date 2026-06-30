@@ -83,8 +83,9 @@ jobs:
           CONTROLD_API_TOKEN: ${{ secrets.CONTROLD_API_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          args=""
+          args="--no-freshness"
           [ "${{ inputs.dry_run }}" = "true" ] && args="$args --dry-run"
           [ -n "${{ inputs.profile }}" ] && args="$args --profile ${{ inputs.profile }}"
           [ "${{ inputs.no_cache }}" = "true" ] && args="$args --no-cache"
           bash sync-hagezi.sh $args
+

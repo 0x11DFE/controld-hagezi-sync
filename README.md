@@ -28,7 +28,8 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 | **Smart change detection** | ✅ Strong (persistent content `cmp` cache + hourly checker) | ⚠️ Partial (in-memory cache per run) | ✅ Strong (workflow cache + release check) | ⚠️ Basic (always re-imports) |
 | **Atomic swaps + Rollback** | ✅ **Yes (v2.0.0+)** (rename → import → cleanup or rollback) | ❌ No (delete then recreate) | ❌ No (delete then recreate) | ❌ No (delete then recreate) |
 | **Post-import validation** | ✅ **Yes (v2.1.0+)** (polls rule count, retries) | ❌ No | ❌ No (basic success logging) | ❌ No |
-| **Self-healing sync** | ✅ **Yes (v2.1.0+)** (validates even unchanged folders) | ❌ No | ❌ No | ❌ No |
+| **Self-healing sync** | ✅ **Yes (v2.1.1+)** (validates even unchanged folders, stale cleanup) | ❌ No | ❌ No | ❌ No |
+| **Large list support** | ✅ **Yes (v2.1.2+)** (file-based upload bypasses ARG_MAX) | ❌ N/A | ❌ N/A | ❌ N/A |
 | **Rule handling** | ✅ Full folder import (atomic via API) | ❌ Rule-by-rule (batched, with duplicate skipping) | ✅ Folder import (batched) | ❌ Batched (after delete/recreate) |
 | **Backup/restore fallback** | ✅ Yes (automatic rename-based rollback) | ❌ No | ❌ No (manual `remove.yml`) | ❌ No |
 | **Zero-cost no-op runs** | ✅ Yes (early exit on unchanged content) | ❌ No (always processes) | ✅ Yes (via release/cache check) | ❌ No |
@@ -50,6 +51,8 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 - **Atomic server-side swaps:** Renames the existing group to `_OLD`, imports the new definition in one shot, then deletes the old group. If import fails, deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name. Zero downtime, zero rule loss.
 - **Post-import validation:** After every import, polls ControlD until the rule count matches the source. If validation fails, automatically invalidates the cache, re-downloads, and retries. If still failing, rolls back cleanly.
 - **Self-healing on every run:** Even folders marked "unchanged upstream" are validated against ControlD. If a previous import silently failed (leaving 0 rules), the folder is re-synced automatically.
+- **Stale group cleanup:** If a previous run was interrupted (network drop, runner kill), leftover `_OLD` groups are detected and removed before attempting renames, preventing permanent deadlock.
+- **Large list support:** Imports are sent via file-based upload (`@payload.json`) instead of inline arguments, bypassing `ARG_MAX` limits for blocklists with hundreds of thousands of rules.
 - Supports multiple profiles with **different folder combinations**
 - Runs on a schedule or on-demand via GitHub Actions
 - **Dry-run mode** to preview changes before they go live
@@ -174,7 +177,7 @@ Tesla = ["Badware Hoster", "My Custom List"]
  --profile NAME     Sync only one profile
  --list-hagezi      List available HaGeZi folders (ready for config.toml)
  --last-updated     Show the last updated date for configured folders and exit
- --check-updates    Check if upstream folders changed, exit 0 if yes, 1 if no
+ --check-updates    Check if upstream folders changed. Prints HAGEZI_UPDATES_AVAILABLE=true/false.
  --no-freshness     Skip the upstream freshness report at end of sync
  --no-cache         Ignore persistent cache, always download fresh lists
  -h, --help         Show help
@@ -198,7 +201,7 @@ CONFIG_FILE=prod.toml ./sync-hagezi.sh
 # Check upstream freshness without syncing
 ./sync-hagezi.sh --last-updated
 
-# Check if updates are available (exit 0 = yes, 1 = no)
+# Check if updates are available (parse stdout for automation)
 ./sync-hagezi.sh --check-updates
 
 # Skip freshness report (CI-friendly)
@@ -225,6 +228,15 @@ After the run completes, open the **Summary** tab on the workflow run page to se
 
 1. **Sync Results** — a markdown table with profile, folder, status (✅/❌), and rule count
 2. **Upstream Freshness** — when each HaGeZi list was last updated on GitHub (relative time + UTC)
+
+### How the workflow works
+
+The CI uses a two-job architecture:
+
+1. **`check` job** — Runs `--check-updates` every hour. If upstream changed, it saves the downloaded content to cache and triggers the `sync` job.
+2. **`sync` job** — Restores the cache from the `check` job (avoiding redundant downloads), then performs the actual ControlD imports.
+
+Cache is passed between jobs using distinct keys (`hagezi-content-check-*` → `hagezi-content-sync-*`) to avoid write collisions while ensuring the `sync` job always has fresh data.
 
 ---
 
@@ -258,19 +270,28 @@ After the run completes, open the **Summary** tab on the workflow run page to se
    - On success: deletes the `_OLD` group
    - On failure: finds and deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name
    - This eliminates the downtime window where rules were previously missing between delete and recreate.
-7. **Post-import validation (v2.1.0):**
+7. **Stale group cleanup (v2.1.1):**
+   - Before renaming, checks if a stale `{name}_OLD` group exists from a previous interrupted run
+   - Deletes it to prevent name-collision deadlock on resumed runs
+8. **Post-import validation (v2.1.0):**
    - After import, polls ControlD every second until the group appears with the expected rule count
    - If the count doesn't match after 30 seconds, the import is considered failed
    - Automatically invalidates the persistent cache, re-downloads, and retries once
    - If retry also fails, rolls back to the original group cleanly
-8. **Self-healing validation (v2.1.0):**
+9. **Self-healing validation (v2.1.1):**
    - Even folders marked "unchanged upstream" are validated on every sync run
    - If ControlD reports 0 rules (or a mismatch), the folder is force-synced regardless of cache state
    - This catches silent import failures from previous runs or external modifications
-9. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
-10. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
-11. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
-12. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
+10. **Large list support (v2.1.2):**
+    - Import payloads are written to a temp file and passed to curl as `@file.json`
+    - Bypasses `ARG_MAX` (2MB Linux, 256KB macOS) for blocklists with hundreds of thousands of rules
+11. **State consistency (v2.1.2):**
+    - After every `sync_folder` call (success or failure), the profile's group state is refreshed
+    - Prevents cascade desync when a folder sync mutates state but ultimately fails
+12. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
+13. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
+14. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
+15. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
 
 > **Note on caching:** GitHub raw URLs (`raw.githubusercontent.com`) do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, `actions/cache` persists the cache directory between runs.
 
@@ -307,7 +328,10 @@ It does **not** support:
 - [x] `--check-updates` — skip sync if HaGeZi lists haven't changed ✅ *Implemented in v1.6.4*
 - [x] **Atomic server-side swaps with automatic rollback** ✅ *Implemented in v2.0.0*
 - [x] **Post-import validation with auto-retry** ✅ *Implemented in v2.1.0*
-- [x] **Self-healing sync for empty groups** ✅ *Implemented in v2.1.0*
+- [x] **Self-healing sync for empty groups** ✅ *Implemented in v2.1.1*
+- [x] **Stale group cleanup** ✅ *Implemented in v2.1.1*
+- [x] **Large list support (ARG_MAX-safe)** ✅ *Implemented in v2.1.2*
+- [x] **State consistency after failed syncs** ✅ *Implemented in v2.1.2*
 - [ ] Rule-level diff to skip swaps when only metadata changed
 
 ---
@@ -325,6 +349,7 @@ It does **not** support:
 | `CRITICAL ERROR: Rollback failed` | The group is stuck as `{name}_OLD`. Manually rename it back in the ControlD dashboard, or run the sync again. |
 | `Validation failed — expected X rules, ControlD has 0` | ControlD processed the import asynchronously and rules weren't ready yet. The script retries automatically. If persistent, the folder may contain rules ControlD rejects (e.g. malformed wildcards). |
 | `Folder unchanged upstream but ControlD mismatch` | A previous import silently failed or the group was modified externally. The script detected this and is force-syncing to heal the state. |
+| `Argument list too long` | Fixed in v2.1.2+. The script now uses file-based uploads for large payloads. Upgrade if you're on an older version. |
 
 ---
 

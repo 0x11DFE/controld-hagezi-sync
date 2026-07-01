@@ -37,7 +37,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ~/.cache/controld-hagezi-sync
-          key: hagezi-content-${{ github.run_id }}
+          key: hagezi-content-check-${{ github.run_id }}
           restore-keys: hagezi-content-
 
       - name: Check for upstream changes
@@ -63,6 +63,12 @@ jobs:
             echo "updates=${{ steps.check.outputs.updates }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Save HaGeZi content cache
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/controld-hagezi-sync
+          key: hagezi-content-check-${{ github.run_id }}
+
   sync:
     needs: check
     if: ${{ needs.check.outputs.has_updates == 'true' }}
@@ -74,8 +80,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cache/controld-hagezi-sync
-          key: hagezi-content-${{ github.run_id }}
-          restore-keys: hagezi-content-
+          key: hagezi-content-sync-${{ github.run_id }}
+          restore-keys: |
+            hagezi-content-check-${{ github.run_id }}
+            hagezi-content-
 
       - name: Run sync
         env:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.1.0
+# Version: 2.1.2
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.1.0"
+VERSION="2.1.2"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -24,7 +24,7 @@ API_BACKOFF_BASE=2
 
 # Persistent cache for content-based change detection
 SYNC_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/controld-hagezi-sync"
-CACHE_VERSION="2"
+CACHE_VERSION="3"
 
 # ---------------------------------------------------------------------------
 # GLOBALS
@@ -64,7 +64,15 @@ api_call_with_retry() {
     local code body retry_after
     local curl_opts=("--request" "$method" "--url" "$url" "--header" "Authorization: Bearer ${API_TOKEN}")
 
-    [[ -n "$data" ]] && curl_opts+=("--header" "content-type: application/json" "--data" "$data")
+    if [[ -n "$data" ]]; then
+        if [[ "$data" == @* ]]; then
+            # File pointer payload (bypasses ARG_MAX)
+            curl_opts+=("--header" "content-type: application/json" "--data-binary" "$data")
+        else
+            # Standard string payload
+            curl_opts+=("--header" "content-type: application/json" "--data" "$data")
+        fi
+    fi
 
     if [[ -z "$API_BODY_FILE" ]]; then
         API_BODY_FILE="$WORK_DIR/api_body_$$"
@@ -199,7 +207,7 @@ parse_toml_array() {
         [[ "$in_quotes" -eq 1 ]] && buf+="$ch"
     done
 
-    local IFS="|"
+    local IFS=$'\x1F'
     echo "${items[*]}"
 }
 
@@ -207,7 +215,7 @@ toml_get() { echo "${_TOML_VALS["$1|$2"]:-}"; }
 
 toml_get_array() {
     local raw="${_TOML_VALS["$1|$2"]:-}"
-    [[ -n "$raw" ]] && tr '|' '\n' <<< "$raw"
+    [[ -n "$raw" ]] && tr $'\x1F' '\n' <<< "$raw"
 }
 
 load_config() {
@@ -623,19 +631,20 @@ rollback_group() {
 
 import_with_validation() {
     local pid="$1" name="$2" cachefile="$3" fname="$4"
-    local import_payload new_pk refreshed_groups
+    local import_payload_file new_pk refreshed_groups
     local total_rules persistent
     local attempt=0 max_attempts=2
 
+    import_payload_file="$WORK_DIR/import_${pid}_$$.json"
     total_rules=$(jq '.rules | length' "$cachefile")
-    import_payload=$(jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile")
+    jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile" > "$import_payload_file"
 
     while (( attempt < max_attempts )); do
         attempt=$(( attempt + 1 ))
         [[ "$attempt" -gt 1 ]] && log "  Retry attempt $attempt/$max_attempts..."
 
         log "  Importing $total_rules rules as '$name'..."
-        if ! api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups/import" "$import_payload" >/dev/null; then
+        if ! api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups/import" "@$import_payload_file" >/dev/null; then
             log "  ERROR: Import failed on attempt $attempt"
             break
         fi
@@ -658,16 +667,18 @@ import_with_validation() {
                     if [[ "$actual_count" -eq "$total_rules" ]]; then
                         log "  New group imported with PK: $new_pk"
                         log "  Validation passed: $actual_count/$total_rules rules match (${poll_count}s)"
+                        rm -f "$import_payload_file"
                         echo "$new_pk"
                         return 0
                     else
-                        log "  WARN: Rule count mismatch — expected $total_rules, got $actual_count"
-                        break 2
+                        log "  Waiting for rules to populate: $actual_count / $total_rules..."
+                        # Continue polling — do NOT break
                     fi
                 fi
             fi
         done
 
+        # Validation failed (timeout or 0 rules), cleaning up...
         log "  Validation failed (timeout or 0 rules), cleaning up..."
         if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
             delete_group_by_pk "$pid" "$new_pk" 2>/dev/null || true
@@ -686,9 +697,10 @@ import_with_validation() {
         fi
 
         total_rules=$(jq '.rules | length' "$cachefile")
-        import_payload=$(jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile")
+        jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile" > "$import_payload_file"
     done
 
+    rm -f "$import_payload_file"
     return 1
 }
 
@@ -713,6 +725,14 @@ sync_folder() {
     old_name="${name}_OLD"
 
     existing_pk=$(find_group_pk_by_name "$groups_json" "$name")
+
+    # Check for stale _OLD group from a previous aborted run
+    local stale_old_pk
+    stale_old_pk=$(find_group_pk_by_name "$groups_json" "$old_name")
+    if [[ -n "$stale_old_pk" && "$stale_old_pk" != "null" ]]; then
+        log "  Found stale '$old_name' from previous run, cleaning up..."
+        delete_group_by_pk "$pid" "$stale_old_pk" 2>/dev/null || true
+    fi
 
     # Step 1: Rename existing to _OLD
     if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
@@ -764,6 +784,7 @@ main() {
     local fname cachefile dl_status
     local skipped=0 downloaded=0 failed=0
     local pname pid PROFILE_GROUPS folder_list f status ALL_PROFILES
+    local current_groups_json
 
     parse_args "$@"
     load_config "$CONFIG_FILE"
@@ -843,15 +864,6 @@ main() {
 
     ALL_PROFILES=$(get_all_profiles) || exit
 
-    if [[ "$downloaded" -eq 0 && "$failed" -eq 0 ]]; then
-        log "All folders unchanged upstream. Nothing to sync."
-        log "========================================"
-        log "Sync Complete: 0 changes needed"
-        log "========================================"
-        print_freshness_report
-        exit 0
-    fi
-
     for pname in "${PROFILE_NAMES[@]}"; do
         [[ -n "$TARGET_PROFILE" && "$pname" != "$TARGET_PROFILE" ]] && continue
 
@@ -864,21 +876,23 @@ main() {
         folder_list="${PROFILE_FOLDERS[$pname]}"
         [[ -z "$folder_list" ]] && { log "  WARN: No folders mapped"; continue; }
 
-        IFS='|' read -ra TO_SYNC <<< "$folder_list"
+        # Fetch profile groups ONCE per profile
+        current_groups_json=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
+
+        IFS=$'\x1F' read -ra TO_SYNC <<< "$folder_list"
         for f in "${TO_SYNC[@]}"; do
             local cachefile="$WORK_DIR/cache/${f// /_}.json"
             local needs_sync=false
 
             if [[ "${FOLDER_CHANGED[$f]}" == "false" ]]; then
                 # Cache says unchanged — but validate ControlD still has the rules
-                local existing_pk groups_json_val
-                groups_json_val=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch groups"; continue; }
-                existing_pk=$(find_group_pk_by_name "$groups_json_val" "$f")
+                local existing_pk
+                existing_pk=$(find_group_pk_by_name "$current_groups_json" "$f")
 
                 if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
                     local actual_count expected_count
                     expected_count=$(jq '.rules | length' "$cachefile")
-                    actual_count=$(jq --arg pk "$existing_pk" '.body.groups[] | select(.PK == ($pk | tonumber)) | .count' <<< "$groups_json_val")
+                    actual_count=$(jq --arg pk "$existing_pk" '.body.groups[] | select(.PK == ($pk | tonumber)) | .count' <<< "$current_groups_json")
 
                     if [[ -n "$actual_count" && "$actual_count" != "null" && "$actual_count" -gt 0 && "$actual_count" -eq "$expected_count" ]]; then
                         log "  Folder: $f — unchanged upstream and validated in ControlD, skipping sync"
@@ -897,14 +911,15 @@ main() {
             fi
 
             if [[ "$needs_sync" == true ]]; then
-                PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
-                sync_folder "$pname" "$pid" "$f" "$cachefile" "$PROFILE_GROUPS"
+                sync_folder "$pname" "$pid" "$f" "$cachefile" "$current_groups_json"
                 status=$?
                 if [[ "$status" -eq 0 ]]; then
                     SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
                 else
                     FAILED_COUNT=$(( FAILED_COUNT + 1 ))
                 fi
+                # ALWAYS refresh state — sync_folder may have mutated it even on failure
+                current_groups_json=$(get_profile_groups "$pid") || { log "  ERROR: Failed to refresh profile groups"; continue; }
             fi
         done
     done

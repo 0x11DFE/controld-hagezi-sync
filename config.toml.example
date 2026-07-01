@@ -32,7 +32,6 @@ names = ["Kids", "Friends", "Adults"]
 [folders]
 "Badware Hoster"         = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/badware-hoster-folder.json"
 "Most Abused TLDs"       = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-combined-folder.json"
-"Spam IDNs"              = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-idns-folder.json"
 "No Safesearch Support"  = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/nosafesearch-folder.json"
 "META Tracker Allow"     = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/meta-tracker-allow-folder.json"
 
@@ -44,6 +43,6 @@ names = ["Kids", "Friends", "Adults"]
 # =============================================================================
 
 [profile_folders]
-Kids    = ["Badware Hoster", "Most Abused TLDs", "Spam IDNs", "No Safesearch Support"]
-Friends = ["Badware Hoster", "Most Abused TLDs", "Spam IDNs", "META Tracker Allow"]
-Adults  = ["Badware Hoster", "Most Abused TLDs", "Spam IDNs", "META Tracker Allow"]
+Kids    = ["Badware Hoster", "Most Abused TLDs", "No Safesearch Support"]
+Friends = ["Badware Hoster", "Most Abused TLDs", "META Tracker Allow"]
+Adults  = ["Badware Hoster", "Most Abused TLDs", "META Tracker Allow"]

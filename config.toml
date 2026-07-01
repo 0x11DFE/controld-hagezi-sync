@@ -40,9 +40,7 @@ names = ["Home"]
 "TikTok Tracker Block-Agg" = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/native-tracker-tiktok-aggressive-folder.json"
 "No Safesearch Support"    = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/nosafesearch-folder.json"
 "Referral Allow"           = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/referral-allow-folder.json"
-"Spam IDNs"                = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-idns-folder.json"
 "Most Abused TLDs"         = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-combined-folder.json"
-"Spam TLDs Allow"          = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/spam-tlds-allow-folder.json"
 "Ult Known Issues Allow"   = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/ultimate-known_issues-allow-folder.json"
 
 # =============================================================================
@@ -53,4 +51,4 @@ names = ["Home"]
 # =============================================================================
 
 [profile_folders]
-Home   = ["Apple PR Allow", "Badware Hoster", "META Tracker Allow", "Amazon Tracker Block", "Apple Tracker Block", "MS Tracker Block", "ROKU Tracker Block", "TikTok Tracker Block-Agg", "No Safesearch Support", "Referral Allow", "Spam IDNs", "Most Abused TLDs", "Spam TLDs Allow", "Ult Known Issues Allow"]
+Home   = ["Apple PR Allow", "Badware Hoster", "META Tracker Allow", "Amazon Tracker Block", "Apple Tracker Block", "MS Tracker Block", "ROKU Tracker Block", "TikTok Tracker Block-Agg", "No Safesearch Support", "Referral Allow", "Most Abused TLDs", "Ult Known Issues Allow"]

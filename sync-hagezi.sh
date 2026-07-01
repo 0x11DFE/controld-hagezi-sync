@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.0.6
+# Version: 2.1.0
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.0.6"
+VERSION="2.1.0"
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION
@@ -24,7 +24,7 @@ API_BACKOFF_BASE=2
 
 # Persistent cache for content-based change detection
 SYNC_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/controld-hagezi-sync"
-CACHE_VERSION="1"
+CACHE_VERSION="2"
 
 # ---------------------------------------------------------------------------
 # GLOBALS
@@ -32,7 +32,7 @@ CACHE_VERSION="1"
 
 declare -a PROFILE_NAMES
 declare -A HAGEZI_FOLDERS PROFILE_FOLDERS _TOML_VALS
-declare -A FOLDER_CHANGED  # Tracks changed vs unchanged per folder
+declare -A FOLDER_CHANGED
 
 DRY_RUN=false
 ACTION_LAST_UPDATED=false
@@ -45,7 +45,6 @@ FAILED_COUNT=0
 WORK_DIR=""
 SUMMARY_FILE=""
 
-# Reusable temp files for API calls (populated after WORK_DIR is set)
 API_BODY_FILE=""
 API_HDR_FILE=""
 
@@ -67,7 +66,6 @@ api_call_with_retry() {
 
     [[ -n "$data" ]] && curl_opts+=("--header" "content-type: application/json" "--data" "$data")
 
-    # Initialize reusable temp files on first use (WORK_DIR must be set)
     if [[ -z "$API_BODY_FILE" ]]; then
         API_BODY_FILE="$WORK_DIR/api_body_$$"
         API_HDR_FILE="$WORK_DIR/api_hdr_$$"
@@ -143,7 +141,7 @@ parse_toml() {
             open_chars="${array_buf//[^\[]/}"; close_chars="${array_buf//[^\]]/}"
             [[ "${#close_chars}" -ge "${#open_chars}" ]] && {
                 in_array=0
-                inner="${array_buf#*\[}"; inner="${inner%\]*}"
+                inner="${array_buf#*\[}"; inner="${array_buf%\]*}"
                 _TOML_VALS["${section}|${key}"]=$(parse_toml_array "$inner")
                 array_buf=""
             }
@@ -270,7 +268,6 @@ check_deps() {
     command -v jq   &>/dev/null || missing+=("jq")
     [[ ${#missing[@]} -gt 0 ]] && { log "ERROR: Missing dependencies: ${missing[*]}"; exit 1; }
 
-    # Verify jq supports fromdateiso8601 (added in 1.6)
     if ! jq -e 'fromdateiso8601' >/dev/null 2>&1 <<< '"1970-01-01T00:00:00Z"'; then
         log "WARN: jq version lacks fromdateiso8601 (requires 1.6+). Using 'date' command fallback."
     fi
@@ -352,7 +349,6 @@ hagezi_folder_epoch() {
 
     epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
     if [[ -z "$epoch" || "$epoch" == "null" ]]; then
-        # Fallback for jq < 1.6 or BSD systems
         local date_clean="${date_str%%.*}"
         epoch=$(date -d "$date_clean" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$date_clean" +%s 2>/dev/null)
     fi
@@ -398,7 +394,6 @@ download_folder_smart() {
         return 2
     fi
 
-    # Only update persistent cache during actual sync runs, not --check-updates
     if [[ "$CHECK_UPDATES" == false ]]; then
         cp "$tmpfile" "$persistent"
     fi
@@ -597,12 +592,113 @@ print_freshness_report() {
 }
 
 # ---------------------------------------------------------------------------
+# ROLLBACK HELPER
+# ---------------------------------------------------------------------------
+
+rollback_group() {
+    local pid="$1" existing_pk="$2" name="$3" new_pk="$4"
+
+    if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
+        log "  Deleting partially-imported group..."
+        delete_group_by_pk "$pid" "$new_pk" 2>/dev/null || true
+    fi
+
+    if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
+        local rollback_payload
+        rollback_payload=$(jq -n --arg n "$name" '{"name": $n}')
+        if api_call_with_retry "PUT" "${API_BASE}/profiles/${pid}/groups/${existing_pk}" "$rollback_payload" >/dev/null; then
+            log "  Rollback complete. Restored original group."
+            return 0
+        else
+            log "  CRITICAL ERROR: Rollback failed. Group is stuck as '${name}_OLD'."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# IMPORT WITH VALIDATION LOOP
+# ---------------------------------------------------------------------------
+
+import_with_validation() {
+    local pid="$1" name="$2" cachefile="$3" fname="$4"
+    local import_payload new_pk refreshed_groups
+    local total_rules persistent
+    local attempt=0 max_attempts=2
+
+    total_rules=$(jq '.rules | length' "$cachefile")
+    import_payload=$(jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile")
+
+    while (( attempt < max_attempts )); do
+        attempt=$(( attempt + 1 ))
+        [[ "$attempt" -gt 1 ]] && log "  Retry attempt $attempt/$max_attempts..."
+
+        log "  Importing $total_rules rules as '$name'..."
+        if ! api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups/import" "$import_payload" >/dev/null; then
+            log "  ERROR: Import failed on attempt $attempt"
+            break
+        fi
+
+        # Poll for group appearance with expected rule count
+        log "  Polling for import completion..."
+        local -i poll_count=0 max_polls=30
+        while (( poll_count < max_polls )); do
+            sleep 1
+            poll_count=$(( poll_count + 1 ))
+
+            refreshed_groups=$(get_profile_groups "$pid") || { sleep 1; continue; }
+            new_pk=$(find_group_pk_by_name "$refreshed_groups" "$name")
+
+            if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
+                local actual_count
+                actual_count=$(jq --arg pk "$new_pk" '.body.groups[] | select(.PK == ($pk | tonumber)) | .count' <<< "$refreshed_groups")
+
+                if [[ -n "$actual_count" && "$actual_count" != "null" && "$actual_count" -gt 0 ]]; then
+                    if [[ "$actual_count" -eq "$total_rules" ]]; then
+                        log "  New group imported with PK: $new_pk"
+                        log "  Validation passed: $actual_count/$total_rules rules match (${poll_count}s)"
+                        echo "$new_pk"
+                        return 0
+                    else
+                        log "  WARN: Rule count mismatch — expected $total_rules, got $actual_count"
+                        break 2
+                    fi
+                fi
+            fi
+        done
+
+        log "  Validation failed (timeout or 0 rules), cleaning up..."
+        if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
+            delete_group_by_pk "$pid" "$new_pk" 2>/dev/null || true
+        fi
+
+        persistent="$SYNC_CACHE/${fname// /_}.json"
+        rm -f "$persistent"
+
+        local dl_status
+        download_folder_smart "${HAGEZI_FOLDERS[$fname]}" "$cachefile" "$fname"
+        dl_status=$?
+
+        if [[ "$dl_status" -ne 0 && "$dl_status" -ne 2 ]]; then
+            log "  ERROR: Re-download failed"
+            break
+        fi
+
+        total_rules=$(jq '.rules | length' "$cachefile")
+        import_payload=$(jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile")
+    done
+
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # SERVER-SIDE ATOMIC SYNC LOGIC
 # ---------------------------------------------------------------------------
 
 sync_folder() {
     local pname="$1" pid="$2" fname="$3" cachefile="$4" groups_json="$5"
-    local existing_pk name old_name total_rules import_payload new_pk
+    local existing_pk name old_name total_rules new_pk
 
     log "  Folder: $fname"
 
@@ -618,7 +714,7 @@ sync_folder() {
 
     existing_pk=$(find_group_pk_by_name "$groups_json" "$name")
 
-    # --- Step 1: Rename existing to _OLD ---
+    # Step 1: Rename existing to _OLD
     if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
         log "  Renaming existing group to '$old_name'..."
         if [[ "$DRY_RUN" == false ]]; then
@@ -632,63 +728,32 @@ sync_folder() {
         fi
     fi
 
-    # --- Step 2: Import new definition ---
-    import_payload=$(jq -c --arg n "$name" '{config: (. | .group.group = $n)}' "$cachefile")
-
+    # Step 2: Dry run
     if [[ "$DRY_RUN" == true ]]; then
         log "  [DRY-RUN] Would import '$name' ($total_rules rules) and delete '$old_name'"
         summary_row "$pname" "$fname" "✅ Success (Dry Run)" "$total_rules"
         return 0
     fi
 
-    log "  Importing $total_rules rules as '$name'..."
-    if api_call_with_retry "POST" "${API_BASE}/profiles/${pid}/groups/import" "$import_payload" >/dev/null; then
-        # --- Step 3a: Success — find new PK and delete old ---
-        # Refresh groups to find the newly imported PK
-        local refreshed_groups
-        refreshed_groups=$(get_profile_groups "$pid") || true
-        new_pk=$(find_group_pk_by_name "$refreshed_groups" "$name")
-
-        if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
-            log "  New group imported with PK: $new_pk"
+    # Step 3: Import with validation loop
+    new_pk=$(import_with_validation "$pid" "$name" "$cachefile" "$fname")
+    if [[ -z "$new_pk" || "$new_pk" == "null" ]]; then
+        log "  ERROR: Import/validation failed. Attempting rollback..."
+        if rollback_group "$pid" "$existing_pk" "$name" "$new_pk"; then
+            summary_row "$pname" "$fname" "❌ Validation failed (rolled back)" "-"
+        else
+            summary_row "$pname" "$fname" "❌ CRITICAL: Rollback failed" "-"
         fi
-
-        if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
-            log "  Cleaning up old group..."
-            delete_group_by_pk "$pid" "$existing_pk"
-        fi
-        summary_row "$pname" "$fname" "✅ Success" "$total_rules"
-        return 0
-    else
-        # --- Step 3b: Failure — rollback ---
-        log "  ERROR: Import failed. Attempting rollback..."
-        
-        # First, try to delete any partially-created new group
-        local refreshed_groups
-        refreshed_groups=$(get_profile_groups "$pid") || true
-        new_pk=$(find_group_pk_by_name "$refreshed_groups" "$name")
-        
-        if [[ -n "$new_pk" && "$new_pk" != "null" ]]; then
-            log "  Deleting partially-imported group..."
-            delete_group_by_pk "$pid" "$new_pk" 2>/dev/null || true
-        fi
-
-        # Then rename _OLD back to original
-        if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
-            local rollback_payload
-            rollback_payload=$(jq -n --arg n "$name" '{"name": $n}')
-            if api_call_with_retry "PUT" "${API_BASE}/profiles/${pid}/groups/${existing_pk}" "$rollback_payload" >/dev/null; then
-                log "  Rollback complete. Restored original group."
-            else
-                log "  CRITICAL ERROR: Rollback failed. Group is stuck as '$old_name'."
-                summary_row "$pname" "$fname" "❌ CRITICAL: Rollback failed" "-"
-                return 1
-            fi
-        fi
-
-        summary_row "$pname" "$fname" "❌ Import failed (rolled back)" "-"
         return 1
     fi
+
+    # Step 4: Success — clean up old group
+    if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
+        log "  Cleaning up old group..."
+        delete_group_by_pk "$pid" "$existing_pk"
+    fi
+    summary_row "$pname" "$fname" "✅ Success" "$total_rules"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -698,12 +763,7 @@ sync_folder() {
 main() {
     local fname cachefile dl_status
     local skipped=0 downloaded=0 failed=0
-    local pname pid
-    local PROFILE_GROUPS
-    local folder_list
-    local f
-    local status
-    local ALL_PROFILES
+    local pname pid PROFILE_GROUPS folder_list f status ALL_PROFILES
 
     parse_args "$@"
     load_config "$CONFIG_FILE"
@@ -747,7 +807,6 @@ main() {
     log "========================================"
 
     log "Pre-downloading HaGeZi folder data..."
-    local -i skipped=0 downloaded=0 failed=0
 
     for fname in "${!HAGEZI_FOLDERS[@]}"; do
         cachefile="$WORK_DIR/cache/${fname// /_}.json"
@@ -807,19 +866,45 @@ main() {
 
         IFS='|' read -ra TO_SYNC <<< "$folder_list"
         for f in "${TO_SYNC[@]}"; do
-            [[ "${FOLDER_CHANGED[$f]}" == "false" ]] && {
-                log "  Folder: $f — unchanged upstream, skipping sync"
-                summary_row "$pname" "$f" "⏭️ Unchanged" "-"
-                continue
-            }
+            local cachefile="$WORK_DIR/cache/${f// /_}.json"
+            local needs_sync=false
 
-            PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
-            sync_folder "$pname" "$pid" "$f" "$WORK_DIR/cache/${f// /_}.json" "$PROFILE_GROUPS"
-            status=$?
-            if [[ "$status" -eq 0 ]]; then
-                SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
+            if [[ "${FOLDER_CHANGED[$f]}" == "false" ]]; then
+                # Cache says unchanged — but validate ControlD still has the rules
+                local existing_pk groups_json_val
+                groups_json_val=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch groups"; continue; }
+                existing_pk=$(find_group_pk_by_name "$groups_json_val" "$f")
+
+                if [[ -n "$existing_pk" && "$existing_pk" != "null" ]]; then
+                    local actual_count expected_count
+                    expected_count=$(jq '.rules | length' "$cachefile")
+                    actual_count=$(jq --arg pk "$existing_pk" '.body.groups[] | select(.PK == ($pk | tonumber)) | .count' <<< "$groups_json_val")
+
+                    if [[ -n "$actual_count" && "$actual_count" != "null" && "$actual_count" -gt 0 && "$actual_count" -eq "$expected_count" ]]; then
+                        log "  Folder: $f — unchanged upstream and validated in ControlD, skipping sync"
+                        summary_row "$pname" "$f" "⏭️ Unchanged" "-"
+                        continue
+                    else
+                        log "  Folder: $f — unchanged upstream but ControlD mismatch ($actual_count vs $expected_count), forcing sync"
+                        needs_sync=true
+                    fi
+                else
+                    log "  Folder: $f — unchanged upstream but missing in ControlD, forcing sync"
+                    needs_sync=true
+                fi
             else
-                FAILED_COUNT=$(( FAILED_COUNT + 1 ))
+                needs_sync=true
+            fi
+
+            if [[ "$needs_sync" == true ]]; then
+                PROFILE_GROUPS=$(get_profile_groups "$pid") || { log "  ERROR: Failed to fetch profile groups"; continue; }
+                sync_folder "$pname" "$pid" "$f" "$cachefile" "$PROFILE_GROUPS"
+                status=$?
+                if [[ "$status" -eq 0 ]]; then
+                    SUCCESS_COUNT=$(( SUCCESS_COUNT + 1 ))
+                else
+                    FAILED_COUNT=$(( FAILED_COUNT + 1 ))
+                fi
             fi
         done
     done

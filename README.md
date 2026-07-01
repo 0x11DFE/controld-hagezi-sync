@@ -7,7 +7,7 @@
 [![Last Commit](https://img.shields.io/github/last-commit/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/commits/main)
 [![Issues](https://img.shields.io/github/issues/0x11DFE/controld-hagezi-sync?style=flat-square)](https://github.com/0x11DFE/controld-hagezi-sync/issues)
 
-> **Zero-dependency Bash with TOML power.** Atomic server-side swaps, human-readable profile names, and robust rollbacks.
+> **Zero-dependency Bash with TOML power.** Atomic server-side swaps, human-readable profile names, robust rollbacks, and post-import validation.
 
 Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the ControlD API.
 
@@ -18,21 +18,23 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 | Feature | [0x11DFE/controld-hagezi-sync](https://github.com/0x11DFE/controld-hagezi-sync) | [keksiqc/ctrld-sync](https://github.com/keksiqc/ctrld-sync) | [italorgama/ctrld-hagezi-sync](https://github.com/italorgama/ctrld-hagezi-sync) | [tupcakes/controld-updater](https://github.com/tupcakes/controld-updater) |
 |:---|:---|:---|:---|:---|
 | **Language** | Bash (`curl` + `jq`) | Python 3 | Go (single binary) | Python + Docker |
-| **Config format** | TOML (human friendly + comments) | Hardcoded + `.env` | `lists.txt` | CLI / config file |
-| **Profile targeting** | By **name** (human-readable) | By **ID** | By **ID** | By **ID** |
-| **Per-profile folder sets** | ✅ Yes (highly flexible) | ❌ No | ❌ No | ❌ No |
+| **Config format** | TOML (human-friendly + comments) | Hardcoded `FOLDER_URLS` in `main.py` + `.env` | `lists.txt` (one URL per line, `#` comments) | CLI args (per-run) / container env |
+| **Profile targeting** | By **name** (human-readable, resolves via API) | By **ID** (supports multiple comma-separated) | By **ID** (comma-separated) | By **ID** (single per run) |
+| **Per-profile folder sets** | ✅ Yes (highly flexible, different combos per profile) | ❌ No (same lists for all profiles) | ❌ No (same lists for all profiles) | ❌ No (one group per run) |
 | **Dry-run** | ✅ Yes (`--dry-run`) | ❌ No | ❌ No | ❌ No |
-| **Single-profile sync** | ✅ Yes (`--profile`) | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Freshness report** | ✅ Yes (detailed + GitHub summary) | ❌ No | ⚠️ Basic | ❌ No |
+| **Single-profile sync** | ✅ Yes (`--profile`) | ✅ Yes (via env) | ✅ Yes | ✅ Yes (CLI) |
+| **Freshness report** | ✅ Yes (detailed + GitHub Actions summary) | ❌ No | ⚠️ Basic (in workflow summary) | ❌ No |
 | **List discovery** | ✅ Yes (`--list-hagezi`) | ❌ No | ✅ Yes (`make list`) | ❌ No |
-| **Smart change detection** | ✅ Strong (persistent content `cmp` cache) | ⚠️ Partial | ✅ Strong | ⚠️ Basic |
-| **Atomic swaps + Rollback** | ✅ **Yes (v2.0.0)** | ❌ No | ❌ No | ❌ No |
-| **Rule handling** | ✅ Full folder import (atomic) | ❌ Rule-by-rule (batched) | ✅ Folder import | ❌ Batched |
-| **Backup/restore fallback** | ✅ Yes (automatic, robust) | ❌ No | ❌ No | ❌ No |
-| **Zero-cost no-op runs** | ✅ Yes (early exit on unchanged content) | ❌ No | ✅ Yes | ❌ No |
-| **Hourly update checker** | ✅ Yes (`--check-updates` + cron) | ❌ No | ❌ No | ❌ No |
-| **GitHub Actions summary** | ✅ Rich markdown + freshness | ⚠️ Basic logs | ⚠️ Good | ❌ None |
-| **Local CLI experience** | ✅ Excellent (many flags) | ⚠️ Good | ⚠️ Good | ⚠️ Container-focused |
+| **Smart change detection** | ✅ Strong (persistent content `cmp` cache + hourly checker) | ⚠️ Partial (in-memory cache per run) | ✅ Strong (workflow cache + release check) | ⚠️ Basic (always re-imports) |
+| **Atomic swaps + Rollback** | ✅ **Yes (v2.0.0+)** (rename → import → cleanup or rollback) | ❌ No (delete then recreate) | ❌ No (delete then recreate) | ❌ No (delete then recreate) |
+| **Post-import validation** | ✅ **Yes (v2.1.0+)** (polls rule count, retries) | ❌ No | ❌ No (basic success logging) | ❌ No |
+| **Self-healing sync** | ✅ **Yes (v2.1.0+)** (validates even unchanged folders) | ❌ No | ❌ No | ❌ No |
+| **Rule handling** | ✅ Full folder import (atomic via API) | ❌ Rule-by-rule (batched, with duplicate skipping) | ✅ Folder import (batched) | ❌ Batched (after delete/recreate) |
+| **Backup/restore fallback** | ✅ Yes (automatic rename-based rollback) | ❌ No | ❌ No (manual `remove.yml`) | ❌ No |
+| **Zero-cost no-op runs** | ✅ Yes (early exit on unchanged content) | ❌ No (always processes) | ✅ Yes (via release/cache check) | ❌ No |
+| **Hourly update checker** | ✅ Yes (`--check-updates` + cron) | ❌ No (daily workflow) | ✅ Yes (every 2h release check) | ❌ No (manual/cron per container) |
+| **GitHub Actions summary** | ✅ Rich markdown + freshness + rule counts | ⚠️ Basic logs | ⚠️ Good (summary with counts) | ❌ None (workflow exists but minimal) |
+| **Local CLI experience** | ✅ Excellent (many flags, help, discovery) | ⚠️ Good (Python script) | ⚠️ Good (binary + Makefile) | ⚠️ Container/CLI-focused |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
 
@@ -46,6 +48,8 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 - **Content-aware caching:** Compares downloaded JSON against a persistent cache. If unchanged, skips all ControlD API calls entirely -- zero-cost no-op syncs
 - **Hourly change detection:** A separate scheduled workflow checks for upstream changes every hour and auto-triggers the sync only when needed
 - **Atomic server-side swaps:** Renames the existing group to `_OLD`, imports the new definition in one shot, then deletes the old group. If import fails, deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name. Zero downtime, zero rule loss.
+- **Post-import validation:** After every import, polls ControlD until the rule count matches the source. If validation fails, automatically invalidates the cache, re-downloads, and retries. If still failing, rolls back cleanly.
+- **Self-healing on every run:** Even folders marked "unchanged upstream" are validated against ControlD. If a previous import silently failed (leaving 0 rules), the folder is re-synced automatically.
 - Supports multiple profiles with **different folder combinations**
 - Runs on a schedule or on-demand via GitHub Actions
 - **Dry-run mode** to preview changes before they go live
@@ -72,8 +76,8 @@ cp config.toml.example config.toml
    - Name: `CONTROLD_API_TOKEN`
    - Value: your ControlD API Write Token from controld.com/dashboard/api
 6. **Run it:**
-   - Go to **Actions -> Sync HaGeZi to ControlD -> Run workflow**
-   - Or wait for the daily 03:00 UTC cron job
+   - Go to **Actions -> Check and Sync HaGeZi to ControlD -> Run workflow**
+   - Or wait for the hourly cron job
 
 After each run, check the **Summary** tab on the workflow run page for a clean markdown table showing exactly what succeeded, what failed, and the rule counts for each profile/folder combination.
 
@@ -215,6 +219,7 @@ When running manually via **Actions -> Run workflow**, you can specify:
 | `profile` | Sync only a specific profile (leave empty for all) |
 | `dry_run` | Check the box to run in preview mode |
 | `no_cache` | Check the box to force fresh download and ignore cache |
+| `skip_check` | Check the box to skip the update check and sync unconditionally |
 
 After the run completes, open the **Summary** tab on the workflow run page to see:
 
@@ -245,20 +250,29 @@ After the run completes, open the **Summary** tab on the workflow run page to se
 1. Reads `config.toml` to know which profiles and folders to manage.
 2. Fetches your ControlD profile list to resolve names to IDs.
 3. Downloads each HaGeZi folder JSON once (cached per run).
-4. **Content-aware change detection:** Compares freshly downloaded JSON against a persistent cache using `cmp -s` (POSIX byte comparison). If identical, the folder is marked unchanged and all ControlD API operations for it are skipped.
-5. **Hourly update checker:** A separate cron workflow runs `--check-updates` every hour. If upstream changed, it auto-triggers the sync workflow. No wasted API calls on quiet days.
+4. **Content-aware change detection:** Compares freshly downloaded JSON against a persistent cache using `cmp -s` (POSIX byte comparison). If identical, the folder is marked unchanged -- but still validated against ControlD before skipping.
+5. **Hourly update checker:** A cron workflow runs `--check-updates` every hour. If upstream changed, it auto-triggers the sync workflow. No wasted API calls on quiet days.
 6. **Atomic server-side swap (v2.0.0):**
    - Renames the existing group to `{name}_OLD` via `PUT /groups/{pk}`
    - Imports the new group + all rules atomically via `POST /groups/import`
    - On success: deletes the `_OLD` group
    - On failure: finds and deletes any partially-created new group, then rolls back by renaming `_OLD` back to the original name
    - This eliminates the downtime window where rules were previously missing between delete and recreate.
-7. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
-8. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
-9. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
-10. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
+7. **Post-import validation (v2.1.0):**
+   - After import, polls ControlD every second until the group appears with the expected rule count
+   - If the count doesn't match after 30 seconds, the import is considered failed
+   - Automatically invalidates the persistent cache, re-downloads, and retries once
+   - If retry also fails, rolls back to the original group cleanly
+8. **Self-healing validation (v2.1.0):**
+   - Even folders marked "unchanged upstream" are validated on every sync run
+   - If ControlD reports 0 rules (or a mismatch), the folder is force-synced regardless of cache state
+   - This catches silent import failures from previous runs or external modifications
+9. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
+10. **I/O-friendly API calls:** Reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
+11. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
+12. Prints a freshness report showing when each HaGeZi list was last updated on GitHub (local CLI only; Actions gets it in the Summary tab).
 
-> **Note on caching:** GitHub raw URLs (`raw.githubusercontent.com`) do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, add `actions/cache` to persist the cache directory between runs.
+> **Note on caching:** GitHub raw URLs (`raw.githubusercontent.com`) do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, `actions/cache` persists the cache directory between runs.
 
 ---
 
@@ -292,6 +306,8 @@ It does **not** support:
 
 - [x] `--check-updates` — skip sync if HaGeZi lists haven't changed ✅ *Implemented in v1.6.4*
 - [x] **Atomic server-side swaps with automatic rollback** ✅ *Implemented in v2.0.0*
+- [x] **Post-import validation with auto-retry** ✅ *Implemented in v2.1.0*
+- [x] **Self-healing sync for empty groups** ✅ *Implemented in v2.1.0*
 - [ ] Rule-level diff to skip swaps when only metadata changed
 
 ---
@@ -307,6 +323,8 @@ It does **not** support:
 | `--list-hagezi shows rate limit` | GitHub unauthenticated API limit is 60/hr or 5000/hr w/ `GITHUB_TOKEN` env var. |
 | `Cache format changed, clearing old cache` | The script auto-invalidates cache when the format changes. This is normal on first run after upgrade. |
 | `CRITICAL ERROR: Rollback failed` | The group is stuck as `{name}_OLD`. Manually rename it back in the ControlD dashboard, or run the sync again. |
+| `Validation failed — expected X rules, ControlD has 0` | ControlD processed the import asynchronously and rules weren't ready yet. The script retries automatically. If persistent, the folder may contain rules ControlD rejects (e.g. malformed wildcards). |
+| `Folder unchanged upstream but ControlD mismatch` | A previous import silently failed or the group was modified externally. The script detected this and is force-syncing to heal the state. |
 
 ---
 

@@ -2,7 +2,7 @@ name: Cleanup sync logs
 
 on:
   workflow_run:
-    workflows: ["Sync Hagezi to ControlD"]
+    workflows: ["Check and Sync HaGeZi to ControlD"]
     types: [completed]
 
 permissions:
@@ -11,7 +11,6 @@ permissions:
 jobs:
   delete-logs:
     runs-on: ubuntu-latest
-    # only clean up successful *scheduled* runs, matching your original intent
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'schedule'

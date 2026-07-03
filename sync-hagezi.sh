@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.2.3
+# Version: 2.2.4
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq, cmp
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.2.3"
+VERSION="2.2.4"
 
 # Bash version check
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -934,15 +934,90 @@ main() {
 
     if [[ "$CHECK_UPDATES" == true ]]; then
         print_freshness_report
+
+        # Upstream content changed → sync needed regardless of ControlD state
         if [[ "$downloaded" -gt 0 ]]; then
             log "UPDATES AVAILABLE: $downloaded folder(s) changed upstream"
             echo "HAGEZI_UPDATES_AVAILABLE=true"
             exit 0
-        else
-            log "No updates available"
-            echo "HAGEZI_UPDATES_AVAILABLE=false"
-            exit 1
         fi
+
+        # -----------------------------------------------------------------
+        # DRIFT DETECTION: Even if HaGeZi hasn't changed, ControlD may have
+        # drifted (manual deletion, partial import, etc.). We validate each
+        # configured folder against live ControlD state. If a group is missing,
+        # we treat it as an update so the sync job can recreate it.
+        #
+        # NOTE: Rule-count mismatch is intentionally NOT checked here.
+        # ControlD deduplicates rules across folders at import time — a rule
+        # present in both an old and new folder will be pruned from the old
+        # one and kept in the new one. This causes an expected, harmless
+        # count mismatch that should NOT trigger a re-sync loop. Only
+        # missing groups (true drift) are flagged.
+        # -----------------------------------------------------------------
+        log "Checking ControlD state consistency..."
+
+        local drift_found=false
+        local drift_pname drift_pid drift_groups_json drift_f
+        local drift_cachefile drift_existing_pk
+
+        # Need profile list for drift detection (not fetched earlier in --check-updates)
+        ALL_PROFILES=$(get_all_profiles) || exit
+
+        for drift_pname in "${PROFILE_NAMES[@]}"; do
+            [[ -n "$TARGET_PROFILE" && "$drift_pname" != "$TARGET_PROFILE" ]] && continue
+
+            drift_pid=$(find_profile_id "$ALL_PROFILES" "$drift_pname")
+            [[ -z "$drift_pid" || "$drift_pid" == "null" ]] && continue
+
+            drift_groups_json=$(get_profile_groups "$drift_pid") || continue
+
+            local drift_folder_list="${PROFILE_FOLDERS[$drift_pname]}"
+            [[ -z "$drift_folder_list" ]] && continue
+
+            local IFS=$'\x1F'
+            read -ra DRIFT_TO_SYNC <<< "$drift_folder_list"
+            for drift_f in "${DRIFT_TO_SYNC[@]}"; do
+                drift_cachefile="$WORK_DIR/cache/$(safe_name "$drift_f").json"
+                [[ ! -f "$drift_cachefile" ]] && continue
+
+                drift_existing_pk=$(find_group_pk_by_name "$drift_groups_json" "$drift_f")
+
+                # Case 1: Group was manually deleted from ControlD (true drift)
+                if [[ -z "$drift_existing_pk" || "$drift_existing_pk" == "null" ]]; then
+                    log "  DRIFT: '$drift_f' missing in profile '$drift_pname'"
+                    drift_found=true
+                    continue
+                fi
+
+                # Group exists and is accounted for — no drift
+                log "  OK: '$drift_f' present in profile '$drift_pname'"
+
+                # Case 2 (DISABLED): Rule count mismatch
+                # ControlD deduplicates across folders — same rule in Folder A
+                # and Folder B will be pruned from A when B is imported. This
+                # creates an expected count drop in A that must not trigger
+                # infinite re-sync loops. Count validation is handled during
+                # the actual import_with_validation() call, not here.
+                #
+                # drift_expected_count=$(jq '.rules | length' "$drift_cachefile")
+                # drift_actual_count=$(jq --arg pk "$drift_existing_pk" '.body.groups[] | select(.PK == ($pk | tonumber)) | .count' <<< "$drift_groups_json")
+                # if [[ -z "$drift_actual_count" || "$drift_actual_count" == "null" || "$drift_actual_count" -eq 0 || "$drift_actual_count" -ne "$drift_expected_count" ]]; then
+                #     log "  DRIFT: '$drift_f' count mismatch in profile '$drift_pname' (${drift_actual_count:-null} vs ${drift_expected_count})"
+                #     drift_found=true
+                # fi
+            done
+        done
+
+        if [[ "$drift_found" == true ]]; then
+            log "UPDATES AVAILABLE: ControlD state drift detected"
+            echo "HAGEZI_UPDATES_AVAILABLE=true"
+            exit 0
+        fi
+
+        log "No updates available"
+        echo "HAGEZI_UPDATES_AVAILABLE=false"
+        exit 1
     fi
 
     ALL_PROFILES=$(get_all_profiles) || exit

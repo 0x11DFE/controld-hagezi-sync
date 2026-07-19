@@ -39,12 +39,12 @@ jobs:
 
       - name: Commit if changed
         run: |
-          if git diff --quiet star-history.svg star-history-dark.svg; then
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add star-history.svg star-history-dark.svg
+          if git diff --cached --quiet; then
             echo "No changes, skipping commit"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add star-history.svg star-history-dark.svg
             git commit -m "chore: update star history chart [skip ci]"
             git push
           fi

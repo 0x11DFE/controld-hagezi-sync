@@ -56,7 +56,6 @@ jobs:
         run: |
           cutoff=$(date -u -d "$MAX_AGE_DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
 
-          # Fetch all completed runs with retry logic for transient API errors
           fetch_runs() {
             local attempt max_attempts=3 delay=5
             for (( attempt=1; attempt<=max_attempts; attempt++ )); do
@@ -80,9 +79,9 @@ jobs:
             echo "No completed runs found (or API error). Exiting."
             exit 0
           fi
-          echo "Found ${#runs[@]} completed run(s); mode: $EVENT, force: ${FORCE:-false}"
+          total_runs=${#runs[@]}
+          echo "Found $total_runs completed run(s); mode: $EVENT, force: ${FORCE:-false}"
 
-          # Determine cleanup mode
           age_cleanup=false
           max_runs_cleanup=false
           if [[ "$EVENT" == "schedule" ]]; then
@@ -91,10 +90,16 @@ jobs:
             age_cleanup=true
             max_runs_cleanup=true
           elif [[ "$EVENT" == "workflow_run" ]]; then
-            # After every sync completion — regardless of whether the sync was
-            # schedule-triggered, push-triggered, or manual — run both cleanups.
             age_cleanup=true
             max_runs_cleanup=true
+          fi
+
+          # Global threshold: if total runs exceed MAX_RUNS, aggressively clean
+          # every workflow down to just its latest run.
+          aggressive=false
+          if [[ "$max_runs_cleanup" == "true" && $total_runs -gt $MAX_RUNS ]]; then
+            aggressive=true
+            echo "Global threshold exceeded ($total_runs > $MAX_RUNS); aggressive cleanup enabled"
           fi
 
           declare -A seen
@@ -102,7 +107,6 @@ jobs:
           for line in "${runs[@]}"; do
             IFS=$'\t' read -r created id wf name conclusion <<< "$line"
 
-            # Skip empty/malformed lines
             if [[ -z "$id" || -z "$wf" ]]; then
               continue
             fi
@@ -117,14 +121,15 @@ jobs:
             delete=false
             if [[ "$FORCE" == "true" ]]; then
               delete=true
-            elif [[ "$max_runs_cleanup" == "true" && ${seen[$wf]} -gt $MAX_RUNS ]]; then
-              # Only cap successful runs via MAX_RUNS; failed runs are left for age_cleanup
-              if [[ "$EVENT" == "workflow_run" && "$conclusion" != "success" ]]; then
-                :
-              else
-                delete=true
-              fi
-            elif [[ "$age_cleanup" == "true" && "$created" < "$cutoff" ]]; then
+            fi
+
+            # Aggressive mode: global cap exceeded → delete all non-sentinel successful runs
+            if [[ "$delete" == "false" && "$aggressive" == "true" && "$conclusion" == "success" ]]; then
+              delete=true
+            fi
+
+            # Age-based cleanup (applies to both successful and failed runs)
+            if [[ "$delete" == "false" && "$age_cleanup" == "true" && "$created" < "$cutoff" ]]; then
               delete=true
             fi
 
@@ -139,4 +144,3 @@ jobs:
           done
 
           echo "Deleted $deleted run(s)"
-

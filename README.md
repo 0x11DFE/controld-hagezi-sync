@@ -22,11 +22,11 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 | **Profile targeting** | By **name** (resolves via API) | By **ID** (comma-separated) | By **ID** (comma-separated) | By **ID** (single per run) |
 | **Per-profile folder sets** | ✅ Yes (flexible, different combos per profile) | ❌ No (same lists for all) | ❌ No (same lists for all) | ❌ No (one group per run) |
 | **Dry-run / CLI** | ✅ Yes (`--dry-run`, `--profile`, many flags) | ❌ No | ❌ No (binary + Makefile) | ✅ Yes (CLI-focused) |
-| **Smart change detection + Atomic swaps + Rollback** | ✅ **Strong** (persistent content `cmp` cache, hourly checker, rename/import/cleanup or full rollback; ControlD drift detection; self-healing validation on every run) | ⚠️ Partial (in-memory cache per run; delete-then-recreate) | ✅ Strong (workflow cache + release check; delete-then-recreate) | ⚠️ Basic (always re-imports; delete-then-recreate) |
+| **Smart change detection + Atomic swaps + Rollback** | ✅ **Strong** (persistent content `cmp` cache, 2-hour checker, rename/import/cleanup or full rollback; ControlD drift detection; self-healing validation on every run) | ⚠️ Partial (in-memory cache per run; delete-then-recreate) | ✅ Strong (workflow cache + release check; delete-then-recreate) | ⚠️ Basic (always re-imports; delete-then-recreate) |
 | **Mirror fallback (GitHub outage)** | ✅ **Yes** (auto-fallback to `dnsbunker.org` mirror on 404; `Last-Modified` or `cmp`-based freshness; HTML directory listing for `--list-hagezi`) | ❌ No | ❌ No | ❌ No |
 | **Post-import validation + Large list support** | ✅ **Yes** (polls rule counts + retries; file-based upload bypasses ARG_MAX) | ❌ No | ⚠️ Basic (success logging) | ❌ No |
 | **List discovery + Freshness report** | ✅ Yes (`--list-hagezi`; detailed + GA summary) | ❌ No | ✅ Yes (`make list`; basic GA summary) | ❌ No |
-| **Zero-cost no-op + Hourly checker** | ✅ Yes (early exit on unchanged; `--check-updates` + cron) | ❌ No (always processes; daily GA) | ✅ Yes (release/cache check; every 2h) | ❌ No (manual/cron per container) |
+| **Zero-cost no-op + 2-hour checker** | ✅ Yes (early exit on unchanged; `--check-updates` + cron) | ❌ No (always processes; daily GA) | ✅ Yes (release/cache check; every 2h) | ❌ No (manual/cron per container) |
 | **GitHub Actions summary + Local experience** | ✅ Rich markdown (freshness, rule counts) + Excellent CLI | ⚠️ Basic logs + Good Python script | ⚠️ Good (counts) + Good (binary/Makefile) | ❌ Minimal + Container/CLI-focused |
 
 **Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- with automatic resilience against GitHub outages -- this is the one.
@@ -44,7 +44,7 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 
 - **Downloads** the latest HaGeZi blocklist folder definitions (JSON)
 - **Content-aware caching** — compares downloaded JSON against a persistent cache. If unchanged, skips all ControlD API calls entirely (zero-cost no-op syncs)
-- **Hourly change detection + drift detection** — checks upstream HaGeZi changes *and* ControlD group existence. Catches manual deletions even when upstream hasn't changed
+- **2-hour change detection + drift detection** — checks upstream HaGeZi changes *and* ControlD group existence. Catches manual deletions even when upstream hasn't changed
 - **Atomic server-side swaps** — renames existing group to `_OLD`, imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring `_OLD`. Zero downtime, zero rule loss
 - **Post-import validation** — polls ControlD until rule count matches the source. Retries once on mismatch; rolls back cleanly if still failing
 - **Self-healing on every run** — even "unchanged" folders are validated against ControlD. If a previous import silently failed or a group was manually deleted, it is force-synced automatically
@@ -74,7 +74,7 @@ cp config.toml.example config.toml
    - Value: your ControlD API Write Token from controld.com/dashboard/api
 6. **Run it:**
    - Go to **Actions -> Check and Sync HaGeZi to ControlD -> Run workflow**
-   - Or wait for the hourly cron job
+   - Or wait for the 2-hour cron job
 
 After each run, check the **Summary** tab on the workflow run page for a clean markdown table showing exactly what succeeded, what failed, and the rule counts for each profile/folder combination.
 
@@ -233,7 +233,7 @@ After the run completes, open the **Summary** tab on the workflow run page to se
 
 The CI uses a two-job architecture:
 
-1. **`check` job** — Runs `--check-updates` every hour. It checks two things:
+1. **`check` job** — Runs `--check-updates` every 2 hours. It checks two things:
    - **Upstream changes:** Has HaGeZi updated any folder JSON?
    - **ControlD drift:** Are all configured groups still present in ControlD? (Catches manual deletions.)
    If either is true, it saves the downloaded content to cache and triggers the `sync` job.
@@ -312,7 +312,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 2. Fetches your ControlD profile list to resolve names to IDs.
 3. Downloads each HaGeZi folder JSON once (cached per run).
 4. **Content-aware change detection** — compares freshly downloaded JSON against a persistent cache using `cmp -s`. If identical, the folder is marked unchanged — but still validated against ControlD before skipping.
-5. **Hourly update checker + drift detection** — `--check-updates` checks both upstream HaGeZi changes and ControlD group existence. If a group was manually deleted but the cache says unchanged, drift is detected and sync is triggered to recreate it.
+5. **2-hour update checker + drift detection** — `--check-updates` checks both upstream HaGeZi changes and ControlD group existence. If a group was manually deleted but the cache says unchanged, drift is detected and sync is triggered to recreate it.
 6. **Atomic server-side swaps** — renames existing group to `{name}_OLD`, imports new definition in one shot, then deletes the old. If import fails, rolls back by restoring `{name}_OLD`. Zero downtime, zero rule loss
 7. **Stale group cleanup** — before renaming, checks for leftover `{name}_OLD` from interrupted runs and deletes it to prevent name-collision deadlock.
 8. **Post-import validation** — polls ControlD until rule count matches the source. If mismatch persists after scaled timeout, invalidates cache, re-downloads, and retries once. If retry fails, rolls back cleanly.
@@ -350,7 +350,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 | **v2.1.1** | Self-healing sync (validates unchanged folders); stale group cleanup |
 | **v2.1.0** | Post-import validation with auto-retry and rollback |
 | **v2.0.0** | Atomic server-side swaps with automatic rollback |
-| **v1.6.4** | `--check-updates` for hourly upstream change detection |
+| **v1.6.4** | `--check-updates` for scheduled upstream change detection |
 
 </details>
 

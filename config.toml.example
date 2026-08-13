@@ -18,6 +18,11 @@ api_token = ""
 # Set to true to preview changes without modifying anything.
 dry_run = false
 
+# Uncomment to override the fallback mirror base URL.
+# Default: https://hagezi-mirror.dnsbunker.org/controld
+# Only needed if you host your own mirror or the default changes.
+# hagezi_mirror_base = "https://hagezi-mirror.dnsbunker.org/controld"
+
 [profiles]
 # Exact names of your ControlD profiles (case-sensitive).
 names = ["Kids", "Friends", "Adults"]

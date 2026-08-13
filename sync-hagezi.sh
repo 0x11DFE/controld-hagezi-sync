@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # ControlD HaGeZi Folder Auto-Sync
-# Version: 2.2.6
+# Version: 2.3.0
 # Description: Syncs HaGeZi DNS blocklist folders using atomic server-side swaps.
 # Requirements: bash 4.3+, curl, jq, cmp
 # =============================================================================
@@ -9,7 +9,7 @@
 set -o pipefail
 shopt -s extglob
 
-VERSION="2.2.6"
+VERSION="2.3.0"
 
 # Bash version check
 if (( BASH_VERSINFO[0] < 4 )); then
@@ -24,6 +24,7 @@ fi
 CONFIG_FILE="${CONFIG_FILE:-config.toml}"
 API_TOKEN="${CONTROLD_API_TOKEN:-}"
 API_BASE="https://api.controld.com"
+MIRROR_BASE="${HAGEZI_MIRROR_BASE:-https://hagezi-mirror.dnsbunker.org/controld}"
 
 API_RETRIES=3
 API_BACKOFF_BASE=2
@@ -59,6 +60,16 @@ API_HDR_FILE=""
 # ---------------------------------------------------------------------------
 
 log() { printf "[%s] %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >&2; }
+
+# ---------------------------------------------------------------------------
+# MIRROR URL HELPER
+# ---------------------------------------------------------------------------
+
+mirror_url_from_primary() {
+    local primary_url="$1"
+    local filename="${primary_url##*/}"
+    echo "${MIRROR_BASE}/${filename}"
+}
 
 # ---------------------------------------------------------------------------
 # SAFE NAME HELPER
@@ -253,6 +264,11 @@ load_config() {
     [[ "$(toml_get "settings" "dry_run")" == "true" ]] && DRY_RUN=true
     [[ "$(toml_get "settings" "show_freshness")" == "false" ]] && SHOW_FRESHNESS=false
 
+    # Read optional mirror override from config.toml
+    local cfg_mirror
+    cfg_mirror=$(toml_get "settings" "hagezi_mirror_base")
+    [[ -n "$cfg_mirror" ]] && MIRROR_BASE="$cfg_mirror"
+
     readarray -t PROFILE_NAMES <<< "$(toml_get_array "profiles" "names")"
     [[ ${#PROFILE_NAMES[@]} -eq 0 || -z "${PROFILE_NAMES[0]}" ]] && { log "ERROR: No profiles configured in $cfg"; exit 1; }
 
@@ -389,20 +405,77 @@ hagezi_folder_epoch() {
     code=$(tail -n1 <<< "$resp")
     body=$(sed '$d' <<< "$resp")
 
-    [[ "$code" != "200" ]] && return 1
-
-    date_str=$(jq -r '.[0].commit.committer.date // empty' <<< "$body")
-    [[ -z "$date_str" ]] && return 1
-
-    epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
-    if [[ -z "$epoch" || "$epoch" == "null" ]]; then
-        local date_clean="${date_str%%.*}"
-        date_clean="${date_clean%Z}"
-        epoch=$(date -u -d "${date_clean}Z" +%s 2>/dev/null || date -j -u -f "%Y-%m-%dT%H:%M:%S" "$date_clean" +%s 2>/dev/null)
+    if [[ "$code" == "200" ]]; then
+        date_str=$(jq -r '.[0].commit.committer.date // empty' <<< "$body")
+        if [[ -n "$date_str" ]]; then
+            epoch=$(jq -r --arg date "$date_str" '($date | sub("\\.[0-9]+"; "") | fromdateiso8601)' 2>/dev/null <<< '{}')
+            if [[ -z "$epoch" || "$epoch" == "null" ]]; then
+                local date_clean="${date_str%%.*}"
+                date_clean="${date_clean%Z}"
+                epoch=$(date -u -d "${date_clean}Z" +%s 2>/dev/null || date -j -u -f "%Y-%m-%dT%H:%M:%S" "$date_clean" +%s 2>/dev/null)
+            fi
+            [[ -n "$epoch" && "$epoch" != "null" ]] && { printf '%s\n' "${epoch}|${date_str}"; return 0; }
+        fi
     fi
-    [[ -z "$epoch" || "$epoch" == "null" ]] && return 1
 
-    printf '%s\n' "${epoch}|${date_str}"
+    # Fallback to mirror Last-Modified header
+    local mirror_url mresp mcode mdate mdate_stripped
+    mirror_url=$(mirror_url_from_primary "$url")
+
+    mresp=$(curl -sI --connect-timeout 10 --max-time 60 "$mirror_url")
+    mcode=$(echo "$mresp" | awk 'NR==1 {print $2}')
+    if [[ "$mcode" == "200" ]]; then
+        mdate=$(echo "$mresp" | awk -F': ' '/^[Ll]ast-[Mm]odified:/ {print $2}' | tr -d '\r\n')
+        if [[ -n "$mdate" ]]; then
+            mdate_stripped="${mdate% GMT}"
+            epoch=$(date -u -d "$mdate" +%s 2>/dev/null || date -j -u -f "%a, %d %b %Y %H:%M:%S" "$mdate_stripped" +%s 2>/dev/null)
+            if [[ -n "$epoch" ]]; then
+                date_str=$(date -u -d "$mdate" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+                printf '%s\n' "${epoch}|${date_str}"
+                return 0
+            fi
+        fi
+    fi
+
+    # Fallback: cmp-based detection using persistent cache
+    local persistent tmpfile dl_url dl_code
+    persistent="$SYNC_CACHE/$(safe_name "$fname").json"
+    if [[ -n "${WORK_DIR:-}" ]]; then
+        tmpfile="$WORK_DIR/$(safe_name "$fname")_epoch_cmp.json"
+    else
+        tmpfile=$(mktemp)
+    fi
+
+    # Try primary first, then mirror
+    dl_url="$url"
+    dl_code=$(curl -sL --connect-timeout 10 --max-time 60 -o "$tmpfile" -w "%{http_code}" "$dl_url")
+    if [[ "$dl_code" != "200" && "$dl_url" != *"dnsbunker.org"* ]]; then
+        dl_url="$mirror_url"
+        dl_code=$(curl -sL --connect-timeout 10 --max-time 60 -o "$tmpfile" -w "%{http_code}" "$dl_url")
+    fi
+
+    if [[ "$dl_code" == "200" ]]; then
+        if [[ -f "$persistent" ]] && cmp -s "$tmpfile" "$persistent"; then
+            # Unchanged — use cache file mtime
+            epoch=$(stat -c %Y "$persistent" 2>/dev/null || stat -f %m "$persistent" 2>/dev/null)
+            if [[ -n "$epoch" ]]; then
+                date_str=$(date -u -d "@$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "$epoch" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+                printf '%s\n' "${epoch}|${date_str}"
+                rm -f "$tmpfile"
+                return 0
+            fi
+        else
+            # Changed or no cache — use now
+            epoch=$(date +%s)
+            date_str=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+            printf '%s\n' "${epoch}|${date_str}"
+            rm -f "$tmpfile"
+            return 0
+        fi
+    fi
+
+    rm -f "$tmpfile"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -413,13 +486,20 @@ download_folder_smart() {
     local url="$1" cachefile="$2" fname="$3"
     local persistent="$SYNC_CACHE/$(safe_name "$fname").json"
     local tmpfile="$WORK_DIR/$(safe_name "$fname")_dl.json"
-    local code
+    local code mirror_url
 
     local gh_headers=()
     if [[ "$url" == *"raw.githubusercontent.com"* && -n "${GITHUB_TOKEN:-}" ]]; then
         gh_headers=(-H "Authorization: token ${GITHUB_TOKEN}")
     fi
     code=$(curl -sL --connect-timeout 10 --max-time 60 "${gh_headers[@]}" -o "$tmpfile" -w "%{http_code}" "$url")
+
+    # Fallback to mirror on 404 from primary source
+    if [[ "$code" == "404" && "$url" != *"dnsbunker.org"* ]]; then
+        mirror_url=$(mirror_url_from_primary "$url")
+        log "  $fname: Primary returned 404, trying mirror..."
+        code=$(curl -sL --connect-timeout 10 --max-time 60 -o "$tmpfile" -w "%{http_code}" "$mirror_url")
+    fi
 
     if [[ "$code" != "200" ]]; then
         log "  ERROR: $fname: HTTP $code"
@@ -473,32 +553,68 @@ list_hagezi() {
     code=$(tail -n1 <<< "$resp")
     body=$(sed '$d' <<< "$resp")
 
-    if [[ "$code" != "200" ]]; then
-        [[ "$code" == "403" ]] && log "ERROR: GitHub API rate limit hit (HTTP 403)."
-        [[ "$code" == "404" ]] && log "ERROR: HaGeZi repo path not found."
-        [[ "$code" != "403" && "$code" != "404" ]] && log "ERROR: GitHub API returned HTTP $code"
-        return 1
+    if [[ "$code" == "200" ]]; then
+        count=$(jq '[.[] | select(.type == "file" and (.name | endswith(".json")))] | length' <<< "$body")
+        [[ "$count" -eq 0 ]] && { log "No .json folder definitions found."; return 1; }
+
+        log "Found $count HaGeZi folder(s) -- ready to paste into config.toml:"
+        echo -e "\n[folders]\n"
+
+        jq -r '
+            .[] | select(.type == "file" and (.name | endswith(".json"))) |
+            (.name |
+                if endswith("-folder.json") then rtrimstr("-folder.json")
+                elif endswith(".json") then rtrimstr(".json")
+                else . end |
+                gsub("_"; " ") |
+                gsub("-"; " ") |
+                . as $raw |
+                ($raw | ascii_upcase[0:1]) + ($raw[1:] | ascii_downcase)
+            ) as $title |
+            "\"\($title)\" = \"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/\(.name)\""
+        ' <<< "$body" | sort
+        return 0
     fi
 
-    count=$(jq '[.[] | select(.type == "file" and (.name | endswith(".json")))] | length' <<< "$body")
-    [[ "$count" -eq 0 ]] && { log "No .json folder definitions found."; return 1; }
+    # Fallback to mirror directory listing
+    if [[ "$code" == "404" || "$code" == "403" ]]; then
+        log "GitHub API unavailable (HTTP $code), trying mirror directory listing..."
+        local mirror_resp mirror_code mirror_body
+        mirror_resp=$(curl -sL --connect-timeout 10 --max-time 60 -w "\n%{http_code}" "${MIRROR_BASE}/")
+        mirror_code=$(tail -n1 <<< "$mirror_resp")
+        mirror_body=$(sed '$d' <<< "$mirror_resp")
 
-    log "Found $count HaGeZi folder(s) -- ready to paste into config.toml:"
-    echo -e "\n[folders]\n"
+        if [[ "$mirror_code" == "200" ]]; then
+            local -a files=()
+            while IFS= read -r line; do
+                if [[ "$line" =~ href=[\"\']([^\"\'>]+\.json)[\"\'] ]]; then
+                    files+=("${BASH_REMATCH[1]}")
+                fi
+            done <<< "$mirror_body"
 
-    jq -r '
-        .[] | select(.type == "file" and (.name | endswith(".json"))) |
-        (.name |
-            if endswith("-folder.json") then rtrimstr("-folder.json")
-            elif endswith(".json") then rtrimstr(".json")
-            else . end |
-            gsub("_"; " ") |
-            gsub("-"; " ") |
-            . as $raw |
-            ($raw | ascii_upcase[0:1]) + ($raw[1:] | ascii_downcase)
-        ) as $title |
-        "\"\($title)\" = \"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/controld/\(.name)\""
-    ' <<< "$body" | sort
+            count=${#files[@]}
+            [[ "$count" -eq 0 ]] && { log "No .json folder definitions found on mirror."; return 1; }
+
+            log "Found $count HaGeZi folder(s) on mirror -- ready to paste into config.toml:"
+            echo -e "\n[folders]\n"
+
+            local name f title
+            for f in "${files[@]}"; do
+                name="${f%.json}"
+                name="${name%-folder}"
+                name="${name//-/ }"
+                name="${name//_/ }"
+                title=$(echo "$name" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2));}1')
+                echo "\"$title\" = \"${MIRROR_BASE}/$f\""
+            done | sort
+            return 0
+        fi
+    fi
+
+    [[ "$code" == "403" ]] && log "ERROR: GitHub API rate limit hit (HTTP 403)."
+    [[ "$code" == "404" ]] && log "ERROR: HaGeZi repo path not found."
+    [[ "$code" != "403" && "$code" != "404" ]] && log "ERROR: GitHub API returned HTTP $code"
+    return 1
 }
 
 show_last_updated() {
@@ -546,6 +662,8 @@ Environment:
   GITHUB_TOKEN         Optional. Authenticates GitHub API calls for freshness
                        reports (raises rate limit from 60 to 5000 req/hr).
                        Automatically available in GitHub Actions.
+  HAGEZI_MIRROR_BASE   Optional. Override the fallback mirror base URL.
+                       Default: https://hagezi-mirror.dnsbunker.org/controld
   CONFIG_FILE          Default configuration file path.
   SYNC_CACHE           Persistent cache directory for content comparison.
                        Default: \$HOME/.cache/controld-hagezi-sync

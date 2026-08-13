@@ -23,12 +23,13 @@ Automatically sync HaGeZi DNS blocklists to your ControlD profiles via the Contr
 | **Per-profile folder sets** | ✅ Yes (flexible, different combos per profile) | ❌ No (same lists for all) | ❌ No (same lists for all) | ❌ No (one group per run) |
 | **Dry-run / CLI** | ✅ Yes (`--dry-run`, `--profile`, many flags) | ❌ No | ❌ No (binary + Makefile) | ✅ Yes (CLI-focused) |
 | **Smart change detection + Atomic swaps + Rollback** | ✅ **Strong** (persistent content `cmp` cache, hourly checker, rename/import/cleanup or full rollback; ControlD drift detection; self-healing validation on every run) | ⚠️ Partial (in-memory cache per run; delete-then-recreate) | ✅ Strong (workflow cache + release check; delete-then-recreate) | ⚠️ Basic (always re-imports; delete-then-recreate) |
+| **Mirror fallback (GitHub outage)** | ✅ **Yes** (auto-fallback to `dnsbunker.org` mirror on 404; `Last-Modified` or `cmp`-based freshness; HTML directory listing for `--list-hagezi`) | ❌ No | ❌ No | ❌ No |
 | **Post-import validation + Large list support** | ✅ **Yes** (polls rule counts + retries; file-based upload bypasses ARG_MAX) | ❌ No | ⚠️ Basic (success logging) | ❌ No |
 | **List discovery + Freshness report** | ✅ Yes (`--list-hagezi`; detailed + GA summary) | ❌ No | ✅ Yes (`make list`; basic GA summary) | ❌ No |
 | **Zero-cost no-op + Hourly checker** | ✅ Yes (early exit on unchanged; `--check-updates` + cron) | ❌ No (always processes; daily GA) | ✅ Yes (release/cache check; every 2h) | ❌ No (manual/cron per container) |
 | **GitHub Actions summary + Local experience** | ✅ Rich markdown (freshness, rule counts) + Excellent CLI | ⚠️ Basic logs + Good Python script | ⚠️ Good (counts) + Good (binary/Makefile) | ❌ Minimal + Container/CLI-focused |
 
-**Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- this is the one.
+**Bottom line:** If you want a lightweight, transparent script where you can define *different* blocklists for *different* family members or devices using plain profile names -- and preview changes before they go live -- with automatic resilience against GitHub outages -- this is the one.
 
 ## Star History
 
@@ -98,6 +99,9 @@ vim config.toml # or nano, etc.
 # Set your token (or add it to config.toml [settings])
 export CONTROLD_API_TOKEN="your_token_here"
 
+# Optional: override the fallback mirror base URL
+# export HAGEZI_MIRROR_BASE="https://hagezi-mirror.dnsbunker.org/controld"
+
 # Run
 chmod +x sync-hagezi.sh
 ./sync-hagezi.sh
@@ -126,6 +130,7 @@ All behavior is driven by `config.toml`.
 | `[settings]` | `api_token` | ControlD API Write Token. Prefer `CONTROLD_API_TOKEN` env var. |
 | `[settings]` | `dry_run` | Set to `true` to preview without changes. |
 | `[settings]` | `show_freshness` | Set to `false` to skip the upstream freshness report after sync. Useful in CI to avoid GitHub's unauthenticated rate limit (60 req/hr). |
+| `[settings]` | `hagezi_mirror_base` | Override the fallback mirror base URL. Default: `https://hagezi-mirror.dnsbunker.org/controld`. Only needed if you host your own mirror. |
 | `[profiles]` | `names` | Array of exact ControlD profile names to sync. |
 | `[folders]` | `"Name"` | Maps a friendly folder name to its HaGeZi JSON URL. |
 | `[profile_folders]` | `` | Array of folder names to sync to that profile. |
@@ -258,6 +263,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 - **Use GitHub Secrets** for the token in CI/CD.
 - The script strips a leading `Bearer ` prefix from the token automatically if present.
 - In GitHub Actions, the token is automatically masked via `::add-mask::` to prevent accidental exposure in logs.
+- **v2.3.0+:** Mirror fallback — if GitHub returns 404, automatically falls back to `hagezi-mirror.dnsbunker.org`. Your GitHub token is never sent to the mirror.
 - **v2.2.0+:** The token is passed to `curl` via a temporary header file instead of the command line, so it no longer appears in `ps` / `proc/*/cmdline` output on shared systems.
 
 ---
@@ -292,6 +298,8 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 | `--check-updates returns true but nothing changed upstream` | A group was manually deleted or a previous import failed silently. Drift detection (v2.2.4+) triggers sync to recreate the missing group. Check logs for `DRIFT:` messages. |
 | `--no-cache still runs the check job` | v2.2.4+: `--no-cache` forces `HAGEZI_UPDATES_AVAILABLE=true` in `--check-updates` mode, and the CI workflow bypasses the check when `no_cache` is set. |
 | `Most Abused TLDs: HTTP 429` | v2.2.6+: raw GitHub downloads now use `GITHUB_TOKEN` authentication (5000 req/hr instead of 60). Ensure `GITHUB_TOKEN` is available in your Actions environment. |
+| `Primary returned 404, trying mirror...` | Normal during GitHub outages. The script automatically falls back to `hagezi-mirror.dnsbunker.org`. Your GitHub token is **never** sent to the mirror. |
+| `--last-updated shows "now" for all folders` | The GitHub API is unavailable and the mirror doesn't send `Last-Modified`. The script falls back to `cmp`-based detection: if content changed vs cache, timestamp is "now"; if unchanged, timestamp is the cache file's mtime. |
 
 ---
 
@@ -317,9 +325,11 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 15. **Stable-count validation** — for large lists or server-side deduplication, the script accepts a stable rule count (unchanged across multiple polls) even if it doesn't exactly match the source. This prevents infinite delete/import loops.
 16. **Concurrency protection** — CI uses a `concurrency` group to prevent interleaved runs from deleting each other's `_OLD` backup groups.
 17. **ControlD drift detection (v2.2.4)** — `--check-updates` now queries live ControlD state to verify group existence. Missing groups and leftover `_OLD` groups (interrupted swaps, v2.2.5+) are flagged as drift. Rule-count mismatch is intentionally **not** checked here because ControlD deduplicates across folders, causing expected count drops that must not trigger re-sync loops.
-18. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
-19. **I/O-friendly API calls** — reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
-20. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
+18. **Mirror fallback** — if GitHub returns 404 or the API is unreachable, the script transparently falls back to `hagezi-mirror.dnsbunker.org` for downloads, freshness checks (`Last-Modified` header), and `--list-hagezi` (HTML directory listing parsing). Your GitHub token is never sent to the mirror.
+19. **Triple-tier freshness detection** — (1) GitHub commit API → (2) mirror `Last-Modified` header → (3) `cmp`-based detection (cache mtime if unchanged, "now" if changed or no cache). Works even when both GitHub and mirror headers are down.
+20. Freshness timestamps are parsed with **pure jq** (`fromdateiso8601`) — identical behavior on Linux, macOS, and Termux without platform-specific `date` binaries.
+21. **I/O-friendly API calls** — reusable temp files in the retry loop eliminate `mktemp` churn on SD cards and slow storage.
+22. In GitHub Actions, generates a **markdown summary** on the workflow run page with sync results and upstream freshness.
 
 > **Note on caching:** GitHub raw URLs do not support HTTP conditional requests (If-Modified-Since / ETag). The full payload is always downloaded. The cache saves ControlD API work, not bandwidth. For GitHub Actions, `actions/cache` persists the cache directory between runs.
 > **Note on rate limits:** As of v2.2.6, raw GitHub downloads use `Authorization: token $GITHUB_TOKEN` when available, raising the limit from 60 req/hr (unauthenticated) to 5000 req/hr. This prevents HTTP 429 failures on busy runners.
@@ -331,6 +341,7 @@ A separate **`Cleanup workflow runs`** workflow runs on a monthly schedule and a
 
 | Version | Highlights |
 |---|---|
+| **v2.3.0** | Mirror fallback — automatic fallback to `hagezi-mirror.dnsbunker.org` on GitHub 404; `Last-Modified` header + `cmp`-based freshness detection; HTML directory listing parser for `--list-hagezi` during outages; `HAGEZI_MIRROR_BASE` env/config override |
 | **v2.2.6** | Authenticated raw GitHub downloads using `GITHUB_TOKEN` to avoid rate limits (HTTP 429); automated workflow-run cleanup |
 | **v2.2.5** | `--check-updates` no longer advances the change-detection baseline (same-count upstream updates were skipped by the sync job); interrupted swaps detected via leftover `_OLD` groups in both skip-validation and drift detection; signal traps exit cleanly |
 | **v2.2.4** | ControlD drift detection in `--check-updates`; `--no-cache` forces sync in check mode; `CONTROLD_API_TOKEN` required in check job |

@@ -20,7 +20,7 @@ dry_run = false
 
 [profiles]
 # Exact names of your ControlD profiles (case-sensitive).
-names = ["Aggressive", "Extreme", "Extreme for Windows", "Hardened"]
+names = ["Proxy", "Extreme", "Extreme for Windows", "Hardened"]
 
 # =============================================================================
 # FOLDER DEFINITIONS
@@ -49,7 +49,7 @@ names = ["Aggressive", "Extreme", "Extreme for Windows", "Hardened"]
 # =============================================================================
 
 [profile_folders]
-"Aggressive"    = ["Badware Hoster", "Known Issues allow", "Referral", "Spam IDNs", "Spam TLDs allow", "Spam TLDs", "Samsung Tracker", "Apple Tracker"]
+"Proxy"   = ["Badware Hoster", "Known Issues allow", "Referral", "Spam IDNs", "Spam TLDs allow", "Spam TLDs", "Samsung Tracker", "Apple Tracker"]
 "Extreme" = ["Badware Hoster", "Known Issues allow", "Referral", "Spam IDNs", "Spam TLDs allow", "Spam TLDs", "Samsung Tracker", "Apple Tracker"]
 "Extreme for Windows"  = ["Badware Hoster", "Known Issues allow", "Referral", "Spam IDNs", "Spam TLDs allow", "Spam TLDs", "Microsoft Tracker", "Apple Tracker"]
 "Hardened"  = ["Badware Hoster", "Known Issues allow", "Referral", "Spam IDNs", "Spam TLDs allow", "Spam TLDs", "LG webOS Tracker", "Samsung Tracker", "Apple Tracker"]
